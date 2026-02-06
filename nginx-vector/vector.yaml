@@ -1,0 +1,96 @@
+# 与完整方案-可落地版.md 一致
+sources:
+  nginx_logs:
+    type: "file"
+    include: ["/var/log/nginx/access.log"]
+    read_from: "beginning"
+
+transforms:
+  # 1. 神策协议解码 + UA 解析
+  sa_decode:
+    type: "remap"
+    inputs: ["nginx_logs"]
+    source: |
+      parsed, err = parse_json(.message)
+      if err == null {
+          . = parsed
+          # 解析 User-Agent
+          if exists(.http_user_agent) {
+              ua, err = parse_user_agent(.http_user_agent)
+              if err == null {
+                  .ua_browser = ua.browser.name
+                  .ua_os = ua.os.name
+                  .ua_device = ua.device.family
+              }
+          }
+          
+          if exists(.sa_data) {
+              # 解码神策 Base64 数据
+              decoded_str, err = decode_base64(.sa_data)
+              if err == null {
+                  sa_payload, err = parse_json(decoded_str)
+                  if err == null {
+                      .distinct_id = sa_payload.distinct_id
+                      .event = sa_payload.event
+                      .type = sa_payload.type
+                      .properties = encode_json(sa_payload.properties)
+                      .project = sa_payload.project
+                      .time = to_timestamp!(sa_payload.time, "milliseconds")
+                      
+                      if match(string!(.event), r'^(\$|debug_)') { .event_group = "DEBUG" }
+                      else { .event_group = "CORE" }
+                      .is_valid = true
+                  }
+              }
+          }
+      }
+
+  # 2. IP 解析 (GeoIP)
+  ip_geoip:
+    type: "geoip"
+    inputs: ["sa_decode"]
+    database: "/var/lib/vector/GeoLite2-City.mmdb" # 需提前准备数据库文件
+    source: "remote_addr"
+    target: "geoip"
+
+  # 3. Redis 元数据校验
+  redis_check:
+    type: "redis"
+    inputs: ["ip_geoip"]
+    url: "redis://redis:6379/0"
+    lookup:
+      # 检查用户是否在白名单或获取元数据
+      key: "user_whitelist:{{distinct_id}}"
+      target: "redis_meta"
+
+  # 4. 最终校验逻辑
+  final_check:
+    type: "remap"
+    inputs: ["redis_check"]
+    source: |
+      # 如果 Redis 中不存在该用户，且不是 DEBUG 数据，则标记为无效（或根据业务逻辑处理）
+      if .event_group != "DEBUG" && .redis_meta == null {
+          .is_valid = false
+          .invalid_reason = "user_not_in_whitelist"
+      }
+
+sinks:
+  to_minio:
+    type: "aws_s3"
+    inputs: ["final_check"]
+    bucket: "paimon-lake"
+    endpoint: "http://minio:9000"
+    region: "us-east-1"
+    auth:
+      access_key_id: "minioadmin"
+      secret_access_key: "minioadmin"
+    compression: "none"
+    encoding:
+      codec: "parquet"
+    key_prefix: "staging/dt={{ format_timestamp!(now(), \"%Y-%m-%d\") }}/"
+    buffer:
+      type: "disk"
+      max_size: 107374182400
+      when_full: "block"
+    batch:
+      max_bytes: 104857600
