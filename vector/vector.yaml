@@ -1,0 +1,115 @@
+# GeoIP 可选：需 bash scripts/lakehouse.sh install 后启用
+# enrichment_tables:
+#   geoip_table:
+#     type: "geoip"
+#     path: "/etc/vector/geoip/GeoLite2-City.mmdb"
+
+sources:
+  nginx_logs:
+    type: "file"
+    include: ["/var/log/nginx/access.log"]
+    read_from: "beginning"
+
+transforms:
+  # 1. 神策协议解码 + UA 解析
+  sa_decode:
+    type: "remap"
+    inputs: ["nginx_logs"]
+    source: |
+      parsed, err = parse_json(.message)
+      if err == null {
+          . = parsed
+          # 解析 User-Agent
+          if exists(.http_user_agent) {
+              ua, err = parse_user_agent(.http_user_agent)
+              if err == null {
+                  .ua_browser = if exists(ua.browser) { ua.browser.name } else { null }
+                  .ua_os = if exists(ua.os) { ua.os.name } else { null }
+                  .ua_device = if exists(ua.device) { ua.device.family } else { null }
+              }
+          }
+          
+          if exists(.sa_data) {
+              # 解码神策 Base64 数据
+              decoded_str, err = decode_base64(.sa_data)
+              if err == null {
+                  sa_payload, err = parse_json(decoded_str)
+                  if err == null {
+                      .distinct_id = sa_payload.distinct_id
+                      .event = sa_payload.event
+                      .type = sa_payload.type
+                      .properties = if sa_payload.properties != null { encode_json(sa_payload.properties) } else { "{}" }
+                      .project = sa_payload.project
+                      if exists(sa_payload.time) {
+                          .time = from_unix_timestamp!(to_int!(sa_payload.time), unit: "milliseconds")
+                      } else if exists(.time) {
+                          .time = parse_timestamp!(.time, format: "%+")
+                      }
+                      if exists(.time) {
+                          .timestamp = .time
+                      }
+                      .event_group = if match(string!(.event), r'^(\$|debug_)') { "DEBUG" } else { "CORE" }
+                      .is_valid = true
+                  }
+              }
+          }
+      }
+
+  # 2. 早期过滤：仅处理有 sa_data 的埋点请求，避免对 /、/api 等非埋点请求做无效处理
+  filter_sa_only:
+    type: "filter"
+    inputs: ["sa_decode"]
+    condition: 'exists(.distinct_id)'
+
+  # 3. IP 解析占位（GeoIP 需 lakehouse.sh install 后启用 enrichment_tables）
+  ip_geoip:
+    type: "remap"
+    inputs: ["filter_sa_only"]
+    source: |
+      .geoip = null
+
+  # 4. 最终校验逻辑 + geoip 转 STRING（Flink 期望）
+  # 注：redis transform 已移除，白名单校验可改在 Flink 层实现
+  final_check:
+    type: "remap"
+    inputs: ["ip_geoip"]
+    source: |
+      .redis_meta = null
+      if exists(.geoip) && is_object(.geoip) {
+          .geoip = encode_json(.geoip)
+      }
+
+  # 6. 过滤：仅保留有效埋点（有 sa_data 且解析成功），避免无埋点请求写入 S3
+  filter_valid:
+    type: "filter"
+    inputs: ["final_check"]
+    condition: '.is_valid == true'
+
+sinks:
+  to_minio:
+    type: "aws_s3"
+    inputs: ["filter_valid"]
+    bucket: "paimon-lake"
+    endpoint: "http://minio:9000"
+    region: "us-east-1"
+    auth:
+      access_key_id: "minioadmin"
+      secret_access_key: "minioadmin"
+    compression: "none"
+    encoding:
+      codec: "json"
+      only_fields: ["time", "distinct_id", "event", "type", "project", "properties", "ua_browser", "ua_os", "geoip", "redis_meta", "remote_addr", "event_group"]
+    # Flink FileSystem JSON 期望 JSONL（每行一个 JSON），而非 JSON 数组
+    framing:
+      method: "character_delimited"
+      character_delimited:
+        delimiter: "\n"
+    key_prefix: "staging/dt=%F/"
+    buffer:
+      type: "disk"
+      max_size: 107374182400
+      when_full: "block"
+    batch:
+      max_bytes: 104857600
+      max_events: 50           # 低流量时按条数 flush
+      timeout_secs: 10         # 定期 flush，避免单条 curl 后长时间无数据

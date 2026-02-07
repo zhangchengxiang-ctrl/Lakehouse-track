@@ -5,6 +5,12 @@ metadata:
   namespace: paimon-lab
 data:
   vector.yaml: |
+    # GeoIP 可选：需下载 GeoLite2-City.mmdb 后取消注释
+    # enrichment_tables:
+    #   geoip_table:
+    #     type: "geoip"
+    #     path: "/var/lib/vector/GeoLite2-City.mmdb"
+
     sources:
       nginx_logs:
         type: "file"
@@ -23,9 +29,9 @@ data:
               if exists(.http_user_agent) {
                   ua, err = parse_user_agent(.http_user_agent)
                   if err == null {
-                      .ua_browser = ua.browser.name
-                      .ua_os = ua.os.name
-                      .ua_device = ua.device.family
+                      .ua_browser = if exists(ua.browser) { ua.browser.name } else { null }
+                      .ua_os = if exists(ua.os) { ua.os.name } else { null }
+                      .ua_device = if exists(ua.device) { ua.device.family } else { null }
                   }
               }
               
@@ -37,49 +43,57 @@ data:
                           .distinct_id = sa_payload.distinct_id
                           .event = sa_payload.event
                           .type = sa_payload.type
-                          .properties = encode_json(sa_payload.properties)
+                          .properties = if sa_payload.properties != null { encode_json(sa_payload.properties) } else { "{}" }
                           .project = sa_payload.project
-                          .time = to_timestamp!(sa_payload.time, "milliseconds")
-                          
-                          if match(string!(.event), r'^(\$|debug_)') { .event_group = "DEBUG" }
-                          else { .event_group = "CORE" }
+                          if exists(sa_payload.time) {
+                              .time = from_unix_timestamp!(to_int!(sa_payload.time), unit: "milliseconds")
+                          } else if exists(.time) {
+                              .time = parse_timestamp!(.time, format: "%+")
+                          }
+                          if exists(.time) {
+                              .timestamp = .time
+                          }
+                          .event_group = if match(string!(.event), r'^(\$|debug_)') { "DEBUG" } else { "CORE" }
                           .is_valid = true
                       }
                   }
               }
           }
 
-      # 2. IP 解析 (GeoIP)
-      ip_geoip:
-        type: "geoip"
+      # 2. 早期过滤：仅处理有 sa_data 的埋点请求
+      filter_sa_only:
+        type: "filter"
         inputs: ["sa_decode"]
-        database: "/var/lib/vector/GeoLite2-City.mmdb"
-        source: "remote_addr"
-        target: "geoip"
+        condition: 'exists(.distinct_id)'
 
-      # 3. Redis 元数据校验
-      redis_check:
-        type: "redis"
-        inputs: ["ip_geoip"]
-        url: "redis://redis:6379/0"
-        lookup:
-          key: "user_whitelist:{{distinct_id}}"
-          target: "redis_meta"
+      # 3. IP 解析占位（GeoIP 需 GeoLite2-City.mmdb 后启用 enrichment_tables）
+      ip_geoip:
+        type: "remap"
+        inputs: ["filter_sa_only"]
+        source: |
+          .geoip = null
 
-      # 4. 最终校验逻辑
+      # 4. 最终校验逻辑 + geoip 转 STRING（Flink 期望）
+      # 注：redis transform 已移除，白名单校验可改在 Flink 层实现
       final_check:
         type: "remap"
-        inputs: ["redis_check"]
+        inputs: ["ip_geoip"]
         source: |
-          if .event_group != "DEBUG" && .redis_meta == null {
-              .is_valid = false
-              .invalid_reason = "user_not_in_whitelist"
+          .redis_meta = null
+          if exists(.geoip) && is_object(.geoip) {
+              .geoip = encode_json(.geoip)
           }
+
+      # 5. 过滤：仅保留有效埋点
+      filter_valid:
+        type: "filter"
+        inputs: ["final_check"]
+        condition: '.is_valid == true'
 
     sinks:
       to_minio:
         type: "aws_s3"
-        inputs: ["final_check"]
+        inputs: ["filter_valid"]
         bucket: "paimon-lake"
         endpoint: "http://minio:9000"
         region: "us-east-1"
@@ -88,11 +102,13 @@ data:
           secret_access_key: "minioadmin"
         compression: "none"
         encoding:
-          codec: "parquet"
-        key_prefix: "staging/dt={{ format_timestamp!(now(), \"%Y-%m-%d\") }}/"
+          codec: "json"
+        key_prefix: "staging/dt=%F/"
         buffer:
           type: "disk"
           max_size: 107374182400
           when_full: "block"
         batch:
           max_bytes: 104857600
+          max_events: 50
+          timeout_secs: 10

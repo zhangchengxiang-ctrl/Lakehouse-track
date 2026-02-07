@@ -5,6 +5,7 @@ resources:
   - namespace.yaml
   - secret-postgres.yaml
   - secret-minio.yaml
+  - configmap-nginx.yaml
   - configmap-vector.yaml
   - postgres.yaml
   - minio.yaml

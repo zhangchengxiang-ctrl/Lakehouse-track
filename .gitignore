@@ -1,13 +1,42 @@
-# 运行时生成
-flink_dist/flink/
-starrocks/
+# ========== 数据与持久化 (CRITICAL) ==========
+data/
+**/data/
+*.db
+*.db-*
 
-# 依赖（需 scripts/download-jars.sh 下载）
-flink_lib/*.jar
+# ========== 依赖包 (通过 scripts/lakehouse.sh install 下载) ==========
+flink/lib/*.jar
+starrocks/jars/*.jar
+vector/geoip/*.mmdb
+!vector/geoip/README.md
 
-# GeoIP（需手动下载）
-nginx-vector/geoip/GeoLite2-City.mmdb
-
-# 环境
-.env
+# ========== 运行时生成与临时文件 ==========
+flink/dist/flink/
+flink/tmp/
+.flink-sql-history
+**/logs/
 *.log
+*.out
+*.pid
+*.tmp
+
+# ========== 环境变量与敏感配置 ==========
+.env
+.env.*
+! .env.example
+scripts/deps.env
+
+# ========== 操作系统与 IDE ==========
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.history/
+
+# ========== Docker ==========
+.docker-compose.override.yml

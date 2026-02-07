@@ -1,31 +1,32 @@
 # Lakehouse-track：埋点全链路（Paimon JDBC 模式，无 Hive）
 # 使用方式：docker compose up -d --build
+# 最小资源模式：各服务已配置内存限制，合计约 8GB
 #
 # 镜像说明：postgres:16 redis:7 minio/minio flink:1.18.1-scala_2.12
 #          starrocks/fe-ubuntu:3.2.6 starrocks/cn-ubuntu:3.2.6（存算分离）
 #          apache/streampark:2.1.6 apache/kafka:3.7.0
-#          app 自构建（基于 nginx:latest）
+#          nginx:latest timberio/vector:0.53.0-alpine（采集端拆分为两镜像，共享 nginx_logs）
 # 简化：StreamPark 元数据复用 PostgreSQL，已移除 MySQL
 #
 # 前置准备：
-# 1. Flink 依赖 JAR 放入 flink_lib/（bash scripts/download-jars.sh）
-# 2. GeoLite2-City.mmdb 放入 nginx-vector/geoip/
-# 3. 启动后在 MinIO 控制台（http://localhost:9001）创建 bucket: paimon-lake
+#   1. bash scripts/lakehouse.sh install
+# MinIO 的 bucket 与 staging 前缀会由 minio-init 自动创建
 #
-# StreamPark 启动：docker compose --profile streampark up -d streampark（需先拷出 Flink 到 flink_dist/flink）
-
-version: "3.8"
+# StreamPark 启动：docker compose --profile streampark up -d streampark（需先拷出 Flink 到 flink/dist/flink）
+#
 services:
   # ========== 埋点链路 (Lakehouse-track) ==========
   postgres:
     image: postgres:16
+    command: ["postgres", "-c", "wal_level=logical"]  # PG CDC 必需，首次部署生效
+    mem_limit: 512m
     environment:
       POSTGRES_USER: paimon
       POSTGRES_PASSWORD: paimon123
       POSTGRES_DB: paimon_db
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./configs/postgres/init:/docker-entrypoint-initdb.d:ro
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U paimon"]
       interval: 5s
@@ -36,6 +37,7 @@ services:
 
   redis:
     image: redis:7
+    mem_limit: 256m
     ports: ["6379:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -47,6 +49,7 @@ services:
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
+    mem_limit: 512m
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
@@ -54,19 +57,31 @@ services:
       - "9000:9000"
       - "9001:9001"
     volumes:
-      - minio_data:/data
+      - ./data/minio:/data
     networks:
       - lakehouse-net
 
-  app:
-    build: ./nginx-vector
+
+  # 采集端：Nginx 写日志 -> 共享目录 -> Vector 读并写入 MinIO
+  nginx:
+    image: nginx:latest
     ports:
       - "80:80"
     volumes:
-      - ./nginx-vector/geoip:/var/lib/vector:ro
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./data/nginx_logs:/var/log/nginx
+    networks:
+      - lakehouse-net
+
+  vector:
+    image: timberio/vector:0.53.0-alpine
+    command: ["--config", "/etc/vector/vector.yaml"]
+    mem_limit: 256m
+    volumes:
+      - ./data/nginx_logs:/var/log/nginx:ro
+      - ./vector/vector.yaml:/etc/vector/vector.yaml:ro
+      - ./vector/geoip:/etc/vector/geoip:ro
     depends_on:
-      redis:
-        condition: service_healthy
       minio:
         condition: service_started
     restart: on-failure
@@ -74,19 +89,24 @@ services:
       - lakehouse-net
 
   # ========== Flink ==========
+  # 使用自定义镜像（flink/Dockerfile）避免 bind mount 覆盖 lib 导致丢失 flink-dist
   flink-jobmanager:
-    image: flink:1.18.1-scala_2.12
+    build:
+      context: .
+      dockerfile: flink/Dockerfile
     container_name: flink-jobmanager
+    hostname: flink-jobmanager
     command: jobmanager
+    mem_limit: 2g
+    volumes:
+      - ./flink/flink.sql:/opt/flink/flink.sql:ro
     environment:
       - AWS_ACCESS_KEY_ID=minioadmin
       - AWS_SECRET_ACCESS_KEY=minioadmin
       - ENABLE_S3_PATH_STYLE_ACCESS=true
+      - "FLINK_PROPERTIES=jobmanager.rpc.address: flink-jobmanager"
     ports:
       - "8081:8081"
-    volumes:
-      - ./configs/flink/flink-conf.yaml:/opt/flink/conf/flink-conf.yaml:ro
-      - ./flink_lib:/opt/flink/lib
     depends_on:
       postgres:
         condition: service_healthy
@@ -96,18 +116,20 @@ services:
       - lakehouse-net
 
   flink-taskmanager:
-    image: flink:1.18.1-scala_2.12
+    build:
+      context: .
+      dockerfile: flink/Dockerfile
     container_name: flink-taskmanager
+    hostname: flink-taskmanager
     command: taskmanager
+    mem_limit: 2g
     environment:
       - AWS_ACCESS_KEY_ID=minioadmin
       - AWS_SECRET_ACCESS_KEY=minioadmin
       - ENABLE_S3_PATH_STYLE_ACCESS=true
+      - "FLINK_PROPERTIES=jobmanager.rpc.address: flink-jobmanager"
     depends_on:
       - flink-jobmanager
-    volumes:
-      - ./configs/flink/flink-conf.yaml:/opt/flink/conf/flink-conf.yaml:ro
-      - ./flink_lib:/opt/flink/lib
     networks:
       - lakehouse-net
 
@@ -119,8 +141,8 @@ services:
     ports:
       - "10000:10000"
     volumes:
-      - ./flink_lib:/opt/streampark/lib
-      - ./flink_dist/flink:/opt/flink
+      - ./flink/lib:/opt/streampark/lib
+      - ./flink/dist/flink:/opt/flink
     environment:
       - DATASOURCE_DIALECT=pgsql
       - DATASOURCE_URL=jdbc:postgresql://postgres:5432/streampark?stringtype=unspecified
@@ -147,7 +169,7 @@ services:
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_LOG_DIRS: "/var/lib/kafka/data"
     volumes:
-      - kafka_data:/var/lib/kafka/data
+      - ./data/kafka:/var/lib/kafka/data
     ports:
       - "9092:9092"
     networks:
@@ -158,24 +180,40 @@ services:
     image: starrocks/fe-ubuntu:3.2.6
     container_name: starrocks-fe
     hostname: starrocks-fe
+    mem_limit: 2g
     command:
       - /bin/bash
       - -c
       - |
-        cat /opt/starrocks-fe-shared.conf >> /opt/starrocks/fe/conf/fe.conf
+        # 1) 避免重复/冲突：清理历史注入的 Paimon 相关 JAR（容器重启也保持幂等）
+        rm -f /opt/starrocks/fe/lib/paimon-bundle-*.jar /opt/starrocks/fe/lib/paimon-s3-*.jar /opt/starrocks/fe/lib/paimon-oss-*.jar 2>/dev/null || true
+        # 2) 注入外部目录依赖（仅复制 Paimon 所需 JAR，避免把历史/无关依赖一并塞进 classpath）
+        cp -f /opt/starrocks-extra-jars/paimon-bundle-*.jar /opt/starrocks/fe/lib/ 2>/dev/null || true
+        cp -f /opt/starrocks-extra-jars/paimon-s3-*.jar /opt/starrocks/fe/lib/ 2>/dev/null || true
+        # 3) 合并共享配置（只追加一次，避免无限增长）
+        if ! grep -q "BEGIN LAKEHOUSE_TRACK_SHARED_CONF" /opt/starrocks/fe/conf/fe.conf 2>/dev/null; then
+          {
+            echo ""
+            echo "# BEGIN LAKEHOUSE_TRACK_SHARED_CONF"
+            cat /opt/starrocks-fe-shared.conf
+            echo "# END LAKEHOUSE_TRACK_SHARED_CONF"
+          } >> /opt/starrocks/fe/conf/fe.conf
+        fi
         /opt/starrocks/fe/bin/start_fe.sh --host_type FQDN
     ports:
       - "8030:8030"
       - "9020:9020"
       - "9030:9030"
     volumes:
-      - ./configs/starrocks/fe-shared.conf:/opt/starrocks-fe-shared.conf:ro
+      - ./starrocks/config/fe-shared.conf:/opt/starrocks-fe-shared.conf:ro
+      - ./starrocks/jars:/opt/starrocks-extra-jars:ro
+      - ./data/starrocks/fe:/opt/starrocks/fe/meta
     healthcheck:
       test: ["CMD-SHELL", "mysql -uroot -h127.0.0.1 -P9030 -e 'show frontends\\G' | grep -q 'Alive: true'"]
       interval: 10s
-      timeout: 5s
+      timeout: 10s
       retries: 5
-      start_period: 30s
+      start_period: 90s
     depends_on:
       minio:
         condition: service_started
@@ -186,10 +224,16 @@ services:
     image: starrocks/cn-ubuntu:3.2.6
     container_name: starrocks-cn
     hostname: starrocks-cn
+    mem_limit: 2g
     command:
       - /bin/bash
       - -c
       - |
+        # 避免重复/冲突：清理历史注入的 Paimon 相关 JAR
+        rm -f /opt/starrocks/cn/lib/paimon-bundle-*.jar /opt/starrocks/cn/lib/paimon-s3-*.jar /opt/starrocks/cn/lib/paimon-oss-*.jar 2>/dev/null || true
+        # 注入外部目录依赖（仅复制 Paimon 所需 JAR）
+        cp -f /opt/starrocks-extra-jars/paimon-bundle-*.jar /opt/starrocks/cn/lib/ 2>/dev/null || true
+        cp -f /opt/starrocks-extra-jars/paimon-s3-*.jar /opt/starrocks/cn/lib/ 2>/dev/null || true
         sleep 15
         mysql --connect-timeout 2 -h starrocks-fe -P9030 -uroot -e "ALTER SYSTEM ADD COMPUTE NODE \"starrocks-cn:9050\";" || true
         /opt/starrocks/cn/bin/start_cn.sh
@@ -197,6 +241,9 @@ services:
       - HOST_TYPE=FQDN
     ports:
       - "8040:8040"
+    volumes:
+      - ./starrocks/jars:/opt/starrocks-extra-jars:ro
+      - ./data/starrocks/cn:/opt/starrocks/cn/storage
     depends_on:
       starrocks-fe:
         condition: service_healthy
@@ -205,9 +252,9 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "mysql -uroot -hstarrocks-fe -P9030 -e 'SHOW COMPUTE NODES\\G' | grep -q 'Alive: true'"]
       interval: 10s
-      timeout: 5s
+      timeout: 10s
       retries: 5
-      start_period: 60s
+      start_period: 120s
     restart: on-failure
     networks:
       - lakehouse-net
@@ -218,6 +265,11 @@ networks:
     driver: bridge
 
 volumes:
-  postgres_data:
-  minio_data:
-  kafka_data:
+  # 使用本地文件夹挂载，不再需要命名的 volume
+  {}
+  # postgres_data:
+  # minio_data:
+  # kafka_data:
+  # nginx_logs:
+  # starrocks_fe_data:
+  # starrocks_cn_data:

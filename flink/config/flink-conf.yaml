@@ -1,0 +1,33 @@
+#==============================================================================
+# Flink 集群配置（最小资源模式）
+#==============================================================================
+jobmanager.memory.process.size: 1600m
+taskmanager.memory.process.size: 1600m
+
+jobmanager.rpc.address: flink-jobmanager
+taskmanager.numberOfTaskSlots: 2
+parallelism.default: 1
+
+io.tmp.dirs: /opt/flink/tmp
+
+# S3 / MinIO（Presto + Hadoop 双实现，FileSystem connector 可能用 Hadoop）
+s3.endpoint: http://minio:9000
+s3.access-key: minioadmin
+s3.secret-key: minioadmin
+s3.path.style.access: true
+# Hadoop s3a（FileSystem connector 使用 s3a:// 路径）
+fs.s3a.endpoint: http://minio:9000
+fs.s3a.access.key: minioadmin
+fs.s3a.secret.key: minioadmin
+fs.s3a.path.style.access: true
+fs.s3a.endpoint.region: us-east-1
+# MinIO 可能不支持 etag 预检，禁用可避免潜在问题
+fs.s3a.change.detection.mode: none
+
+# 容错
+execution.checkpointing.interval: 30s
+execution.checkpointing.mode: EXACTLY_ONCE
+state.backend: hashmap
+state.checkpoints.dir: s3://paimon-lake/flink/checkpoints
+
+classloader.resolve-order: parent-first
