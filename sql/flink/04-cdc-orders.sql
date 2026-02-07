@@ -1,6 +1,4 @@
--- Flink CDC: PG orders -> StarRocks dim_orders
--- 需根据实际 PG 连接信息修改 hostname、database-name、table-name 等
-
+-- Flink CDC: PG orders -> StarRocks dim_orders（示例，需根据实际业务修改）
 CREATE TABLE cdc_orders (
     order_id STRING,
     user_id STRING,
@@ -27,8 +25,8 @@ CREATE TABLE sr_dim_orders (
     PRIMARY KEY (order_id) NOT ENFORCED
 ) WITH (
     'connector' = 'starrocks',
-    'jdbc-url' = 'jdbc:mysql://starrocks:9030',
-    'load-url' = 'starrocks:8030',
+    'jdbc-url' = 'jdbc:mysql://starrocks-fe:9030',
+    'load-url' = 'starrocks-fe:8030',
     'database-name' = 'ods',
     'table-name' = 'dim_orders',
     'username' = 'root',

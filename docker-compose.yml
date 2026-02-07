@@ -1,21 +1,38 @@
-# 完整方案：埋点全链路 POC
-# 使用方式：docker-compose up -d --build
-# 前置：需将 Flink 依赖 JAR 放入 flink-lib/ 目录
+# Lakehouse-track：埋点全链路（Paimon JDBC 模式，无 Hive）
+# 使用方式：docker compose up -d --build
+#
+# 镜像说明：postgres:16 redis:7 minio/minio flink:1.18.1-scala_2.12
+#          starrocks/fe-ubuntu:3.2.6 starrocks/cn-ubuntu:3.2.6（存算分离）
+#          apache/streampark:2.1.6 apache/kafka:3.7.0
+#          app 自构建（基于 nginx:latest）
+# 简化：StreamPark 元数据复用 PostgreSQL，已移除 MySQL
+#
+# 前置准备：
+# 1. Flink 依赖 JAR 放入 flink_lib/（bash scripts/download-jars.sh）
+# 2. GeoLite2-City.mmdb 放入 nginx-vector/geoip/
+# 3. 启动后在 MinIO 控制台（http://localhost:9001）创建 bucket: paimon-lake
+#
+# StreamPark 启动：docker compose --profile streampark up -d streampark（需先拷出 Flink 到 flink_dist/flink）
 
+version: "3.8"
 services:
+  # ========== 埋点链路 (Lakehouse-track) ==========
   postgres:
-    image: postgres:15
+    image: postgres:16
     environment:
       POSTGRES_USER: paimon
       POSTGRES_PASSWORD: paimon123
       POSTGRES_DB: paimon_db
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./configs/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U paimon"]
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - lakehouse-net
 
   redis:
     image: redis:7
@@ -24,9 +41,11 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       retries: 5
+    networks:
+      - lakehouse-net
 
   minio:
-    image: minio/minio
+    image: minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -36,53 +55,169 @@ services:
       - "9001:9001"
     volumes:
       - minio_data:/data
+    networks:
+      - lakehouse-net
 
   app:
     build: ./nginx-vector
     ports:
       - "80:80"
+    volumes:
+      - ./nginx-vector/geoip:/var/lib/vector:ro
     depends_on:
-      - minio
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    restart: on-failure
+    networks:
+      - lakehouse-net
 
+  # ========== Flink ==========
   flink-jobmanager:
-    image: flink:1.18
+    image: flink:1.18.1-scala_2.12
+    container_name: flink-jobmanager
     command: jobmanager
     environment:
-      - |
-        FLINK_PROPERTIES=
-        jobmanager.rpc.address: flink-jobmanager
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - ENABLE_S3_PATH_STYLE_ACCESS=true
     ports:
       - "8081:8081"
     volumes:
-      - ./flink-lib:/opt/flink/lib
+      - ./configs/flink/flink-conf.yaml:/opt/flink/conf/flink-conf.yaml:ro
+      - ./flink_lib:/opt/flink/lib
     depends_on:
       postgres:
         condition: service_healthy
       minio:
         condition: service_started
+    networks:
+      - lakehouse-net
 
   flink-taskmanager:
-    image: flink:1.18
+    image: flink:1.18.1-scala_2.12
+    container_name: flink-taskmanager
     command: taskmanager
     environment:
-      - |
-        FLINK_PROPERTIES=
-        jobmanager.rpc.address: flink-jobmanager
-        taskmanager.numberOfTaskSlots: 4
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - ENABLE_S3_PATH_STYLE_ACCESS=true
     depends_on:
       - flink-jobmanager
     volumes:
-      - ./flink-lib:/opt/flink/lib
+      - ./configs/flink/flink-conf.yaml:/opt/flink/conf/flink-conf.yaml:ro
+      - ./flink_lib:/opt/flink/lib
+    networks:
+      - lakehouse-net
 
-  starrocks:
-    image: starrocks/all-in-one:latest
+  streampark:
+    image: apache/streampark:2.1.6
+    container_name: streampark
+    profiles:
+      - streampark
     ports:
-      - "9030:9030"
+      - "10000:10000"
+    volumes:
+      - ./flink_lib:/opt/streampark/lib
+      - ./flink_dist/flink:/opt/flink
+    environment:
+      - DATASOURCE_DIALECT=pgsql
+      - DATASOURCE_URL=jdbc:postgresql://postgres:5432/streampark?stringtype=unspecified
+      - DATASOURCE_USERNAME=paimon
+      - DATASOURCE_PASSWORD=paimon123
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - lakehouse-net
+
+  # ========== 消息队列与分析层（可选，当前埋点链路未使用） ==========
+  kafka:
+    image: apache/kafka:3.7.0
+    profiles:
+      - kafka
+    container_name: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LOG_DIRS: "/var/lib/kafka/data"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    ports:
+      - "9092:9092"
+    networks:
+      - lakehouse-net
+
+  # ========== StarRocks 存算分离（FE + CN，数据存 MinIO） ==========
+  starrocks-fe:
+    image: starrocks/fe-ubuntu:3.2.6
+    container_name: starrocks-fe
+    hostname: starrocks-fe
+    command:
+      - /bin/bash
+      - -c
+      - |
+        cat /opt/starrocks-fe-shared.conf >> /opt/starrocks/fe/conf/fe.conf
+        /opt/starrocks/fe/bin/start_fe.sh --host_type FQDN
+    ports:
       - "8030:8030"
+      - "9020:9020"
+      - "9030:9030"
+    volumes:
+      - ./configs/starrocks/fe-shared.conf:/opt/starrocks-fe-shared.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysql -uroot -h127.0.0.1 -P9030 -e 'show frontends\\G' | grep -q 'Alive: true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      minio:
+        condition: service_started
+    networks:
+      - lakehouse-net
+
+  starrocks-cn:
+    image: starrocks/cn-ubuntu:3.2.6
+    container_name: starrocks-cn
+    hostname: starrocks-cn
+    command:
+      - /bin/bash
+      - -c
+      - |
+        sleep 15
+        mysql --connect-timeout 2 -h starrocks-fe -P9030 -uroot -e "ALTER SYSTEM ADD COMPUTE NODE \"starrocks-cn:9050\";" || true
+        /opt/starrocks/cn/bin/start_cn.sh
+    environment:
+      - HOST_TYPE=FQDN
+    ports:
       - "8040:8040"
     depends_on:
-      - minio
+      starrocks-fe:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "mysql -uroot -hstarrocks-fe -P9030 -e 'SHOW COMPUTE NODES\\G' | grep -q 'Alive: true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    restart: on-failure
+    networks:
+      - lakehouse-net
+
+networks:
+  lakehouse-net:
+    name: lakehouse-net
+    driver: bridge
 
 volumes:
   postgres_data:
   minio_data:
+  kafka_data:

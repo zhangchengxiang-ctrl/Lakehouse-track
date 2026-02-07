@@ -1,0 +1,13 @@
+# 运行时生成
+flink_dist/flink/
+starrocks/
+
+# 依赖（需 scripts/download-jars.sh 下载）
+flink_lib/*.jar
+
+# GeoIP（需手动下载）
+nginx-vector/geoip/GeoLite2-City.mmdb
+
+# 环境
+.env
+*.log

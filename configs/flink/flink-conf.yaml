@@ -1,0 +1,34 @@
+#==============================================================================
+# Flink 集群配置
+#==============================================================================
+jobmanager.memory.process.size: 1600m
+taskmanager.memory.process.size: 1728m
+
+jobmanager.rpc.address: flink-jobmanager
+taskmanager.numberOfTaskSlots: 4
+parallelism.default: 1
+
+io.tmp.dirs: /opt/flink/tmp
+flink.hadoop.fs.s3a.buffer.dir: /opt/flink/tmp
+flink.hadoop.fs.s3a.fast.upload: true
+flink.hadoop.fs.s3a.fast.upload.buffer: disk
+
+# S3 / MinIO
+s3.endpoint: http://minio:9000
+s3.access-key: minioadmin
+s3.secret-key: minioadmin
+s3.path.style.access: true
+flink.hadoop.fs.s3a.endpoint: http://minio:9000
+flink.hadoop.fs.s3a.access.key: minioadmin
+flink.hadoop.fs.s3a.secret.key: minioadmin
+flink.hadoop.fs.s3a.path.style.access: true
+flink.hadoop.fs.s3a.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+flink.hadoop.fs.s3a.connection.ssl.enabled: false
+
+# 容错
+execution.checkpointing.interval: 30s
+execution.checkpointing.mode: EXACTLY_ONCE
+state.backend: hashmap
+state.checkpoints.dir: s3a://paimon-lake/flink/checkpoints
+
+classloader.resolve-order: parent-first
