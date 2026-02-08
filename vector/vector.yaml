@@ -1,8 +1,8 @@
 # GeoIP 可选：需 bash scripts/lakehouse.sh install 后启用
-# enrichment_tables:
-#   geoip_table:
-#     type: "geoip"
-#     path: "/etc/vector/geoip/GeoLite2-City.mmdb"
+enrichment_tables:
+  geoip_table:
+    type: "geoip"
+    path: "/etc/vector/geoip/GeoLite2-City.mmdb"
 
 sources:
   nginx_logs:
@@ -114,13 +114,178 @@ transforms:
               .properties = merge!(.properties, payload.lib)
           }
 
+          # DistinctId 简化处理（无缓存映射）
+          login_id = if exists(payload.login_id) { payload.login_id } else { null }
+          anonymous_id = if exists(payload.anonymous_id) { payload.anonymous_id } else { null }
+          original_id = if exists(payload.original_id) { payload.original_id } else { null }
+
+          is_login = false
+          final_id = .distinct_id
+          valid_id = false
+          if is_string(login_id) && login_id != "" && login_id != "-1" {
+              final_id = login_id
+              is_login = true
+              valid_id = true
+          } else if is_string(anonymous_id) && anonymous_id != "" && anonymous_id != "-1" {
+              final_id = anonymous_id
+              valid_id = true
+          } else if is_string(.distinct_id) && .distinct_id != "" && .distinct_id != "-1" {
+              valid_id = true
+          }
+
+          if valid_id {
+              .distinct_id = final_id
+              .properties."$is_login_id" = is_login
+              if is_string(login_id) { .login_id = login_id }
+              if is_string(anonymous_id) { .anonymous_id = anonymous_id }
+              if is_string(original_id) { .original_id = original_id }
+          } else {
+              .is_valid = false
+              .error_type = "invalid_distinct_id"
+          }
+
+          # track_signup 补充 original_id
+          if exists(.type) && .type == "track_signup" && is_string(original_id) && original_id != "" {
+              .properties."$track_signup_original_id" = original_id
+              .properties."$is_login_id" = true
+          }
+
+          # track_id_bind / track_id_unbind 简化处理
+          if exists(.type) && .type == "track_id_bind" {
+              if is_string(login_id) && login_id != "" && login_id != "-1" {
+                  .distinct_id = login_id
+                  .properties."$is_login_id" = true
+                  if is_string(original_id) && original_id != "" {
+                      .properties."$track_id_bind_original_id" = original_id
+                  }
+              }
+          } else if exists(.type) && .type == "track_id_unbind" {
+              if is_string(original_id) && original_id != "" {
+                  .distinct_id = original_id
+                  .properties."$is_login_id" = false
+              }
+          }
+
+          # 标准化 OS 名称
+          if exists(.properties."$os") && is_string(.properties."$os") {
+              os_name = downcase(strip_whitespace!(.properties."$os"))
+              if os_name == "iphone os" || os_name == "ios" {
+                  .properties."$os" = "iOS"
+              } else if os_name == "android" {
+                  .properties."$os" = "Android"
+              }
+          }
+
+          # Android 版本修正
+          if exists(.properties."$os") && .properties."$os" == "Android" && exists(.properties."$os_version") && is_string(.properties."$os_version") {
+              os_ver = strip_whitespace!(.properties."$os_version")
+              if os_ver == "8.0" {
+                  .properties."$os_version" = "8.0.0"
+              } else if os_ver == "8.1" {
+                  .properties."$os_version" = "8.1.0"
+              }
+          }
+
+          # JS SDK 的 URL host 提取
+          if exists(.properties."$lib") && is_string(.properties."$lib") && exists(.properties."$url") && is_string(.properties."$url") {
+              lib_name = downcase(strip_whitespace!(.properties."$lib"))
+              if lib_name == "js" || lib_name == "javascript" {
+                  parsed_url, err = parse_url(.properties."$url")
+                  if err == null && exists(parsed_url.host) {
+                      .properties."$url_host" = parsed_url.host
+                  }
+              }
+          }
+
+          # profile 记录移除无用字段
+          if exists(.type) && (.type == "profile_set" || .type == "profile_set_once") {
+              del(.properties."$device_id_list")
+              del(.properties."$is_deleted")
+          }
+
+          # JS profile 的 $first_visit_time 规范化
+          if exists(.type) && (.type == "profile_set" || .type == "profile_set_once") {
+              if exists(.properties."$first_visit_time") && exists(.properties."$lib") && is_string(.properties."$lib") {
+                  lib_name = downcase(strip_whitespace!(.properties."$lib"))
+                  if lib_name == "js" || lib_name == "javascript" {
+                      if exists(.msec) {
+                          msec_val, err = to_float(.msec)
+                          if err == null {
+                              first_time_ms = to_int(msec_val * 1000.0)
+                              if first_time_ms > 0 {
+                                  first_ts = from_unix_timestamp!(first_time_ms, unit: "milliseconds")
+                                  .properties."$first_visit_time" = format_timestamp!(first_ts, format: "%Y-%m-%d %H:%M:%S.%3f")
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          # 事件时长字段处理
+          if exists(.properties.event_duration) {
+              if is_integer(.properties.event_duration) || is_float(.properties.event_duration) {
+                  if .properties.event_duration >= 0 {
+                      .properties."$event_duration" = .properties.event_duration
+                  }
+              }
+              del(.properties.event_duration)
+          }
+
+          # 记录属性键集合（用于后续属性元数据校验）
+          if is_object(.properties) {
+              props_keys, err = keys(.properties)
+              if err == null {
+                  .properties_keys = props_keys
+              }
+          }
+
           # 解析 User-Agent (仅在 normalize 阶段解析一次，节省 CPU)
           if exists(.http_user_agent) && .http_user_agent != "-" {
-              ua, err = parse_user_agent(.http_user_agent)
-              if err == null {
-                  .ua_browser = if exists(ua.browser) { ua.browser.name } else { null }
-                  .ua_os = if exists(ua.os) { ua.os.name } else { null }
-                  .ua_device = if exists(ua.device) { ua.device.family } else { null }
+              if !exists(.properties."$user_agent") {
+                  .properties."$user_agent" = .http_user_agent
+              }
+
+              if !match(.http_user_agent, r'^SensorsAnalytics') {
+                  ua, err = parse_user_agent(.http_user_agent)
+                  if err == null {
+                      .ua_browser = if exists(ua.browser) { ua.browser.name } else { null }
+                      .ua_os = if exists(ua.os) { ua.os.name } else { null }
+                      .ua_device = if exists(ua.device) { ua.device.family } else { null }
+
+                      if exists(ua.os) {
+                          if exists(ua.os.name) && !exists(.properties."$os") {
+                              .properties."$os" = ua.os.name
+                          }
+                          if exists(ua.os.version) && !exists(.properties."$os_version") {
+                              .properties."$os_version" = ua.os.version
+                          }
+                      }
+                      if exists(ua.browser) {
+                          if exists(ua.browser.name) && !exists(.properties."$browser") {
+                              .properties."$browser" = ua.browser.name
+                          }
+                          if exists(ua.browser.version) && !exists(.properties."$browser_version") {
+                              .properties."$browser_version" = ua.browser.version
+                          }
+                      }
+                      if exists(ua.device) {
+                          if exists(ua.device.brand) && !exists(.properties."$manufacturer") {
+                              .properties."$manufacturer" = ua.device.brand
+                          }
+                          if exists(ua.device.model) && !exists(.properties."$model") {
+                              .properties."$model" = ua.device.model
+                          }
+                          if exists(ua.device.category) && !exists(.properties."$device_type") {
+                              .properties."$device_type" = ua.device.category
+                          }
+                      }
+                  }
+              }
+
+              # 简单 bot 标记
+              if match(downcase(.http_user_agent), r'(bot|crawler|spider|scrapy)') {
+                  .properties."$bot_name" = "bot"
               }
           }
 
@@ -150,7 +315,8 @@ transforms:
               .hour = format_timestamp!(.time, format: "%H")
           }
 
-          .event_group = if match(string!(.event), r'^(\$|debug_)') { "DEBUG" } else { "CORE" }
+          # event_group 三分：DEBUG(debug_*) / CORE($ 预置) / TRACE(自定义)
+          .event_group = if match(string!(.event), r'^debug_') { "DEBUG" } else { if match(string!(.event), r'^\$') { "CORE" } else { "TRACE" } }
           .is_valid = if exists(.distinct_id) { true } else { false }
           
           # 清理中间字段
@@ -179,12 +345,40 @@ transforms:
     inputs: ["sa_normalize"]
     condition: 'exists(.distinct_id)'
 
-  # 3. IP 解析占位
+  # 3. IP 解析 + 国家/省/市
   ip_geoip:
     type: "remap"
     inputs: ["filter_sa_only"]
     source: |
-      .geoip = null
+      if !exists(.properties) || !is_object(.properties) {
+          .properties = {}
+      }
+
+      # 写入 $ip
+      if (!exists(.properties."$ip") || .properties."$ip" == "") && exists(.remote_addr) {
+          .properties."$ip" = .remote_addr
+      }
+
+      # GeoIP 增强
+      if exists(.properties."$ip") && is_string(.properties."$ip") && .properties."$ip" != "" {
+          geo_record, err = get_enrichment_table_record(
+              table: "geoip_table",
+              condition: {"ip": .properties."$ip"}
+          )
+          if err == null && is_object(geo_record) {
+              .geoip = geo_record
+
+              if (!exists(.properties."$country") || .properties."$country" == "") && exists(geo_record.country_name) {
+                  .properties."$country" = geo_record.country_name
+              }
+              if (!exists(.properties."$province") || .properties."$province" == "") && exists(geo_record.region_name) {
+                  .properties."$province" = geo_record.region_name
+              }
+              if (!exists(.properties."$city") || .properties."$city" == "") && exists(geo_record.city_name) {
+                  .properties."$city" = geo_record.city_name
+              }
+          }
+      }
 
   # 4. 最终校验逻辑
   final_check:
@@ -218,7 +412,7 @@ sinks:
     compression: "none"
     encoding:
       codec: "json"
-      only_fields: ["time", "distinct_id", "event", "type", "project", "properties", "ua_browser", "ua_os", "ua_device", "geoip", "redis_meta", "remote_addr", "event_group"]
+      only_fields: ["time", "distinct_id", "login_id", "anonymous_id", "original_id", "event", "type", "project", "properties", "properties_keys", "ua_browser", "ua_os", "ua_device", "geoip", "redis_meta", "remote_addr", "event_group", "dt", "hour"]
     # Flink FileSystem JSON 期望 JSONL（每行一个 JSON），而非 JSON 数组
     framing:
       method: "character_delimited"

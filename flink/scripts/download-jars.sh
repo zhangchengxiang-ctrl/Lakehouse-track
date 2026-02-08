@@ -51,6 +51,7 @@ download "org/apache/flink/flink-s3-fs-hadoop/1.20.3/flink-s3-fs-hadoop-1.20.3.j
 # Paimon 采用 bundled jar（减少 classpath 冲突）
 download "org/apache/paimon/paimon-flink-1.20/1.3.1/paimon-flink-1.20-1.3.1.jar"
 download "org/apache/flink/flink-connector-files/1.20.3/flink-connector-files-1.20.3.jar"
+download "org/apache/flink/flink-connector-jdbc/1.20.3/flink-connector-jdbc-1.20.3.jar"
 download "org/postgresql/postgresql/42.7.3/postgresql-42.7.3.jar"
 # Flink CDC 3.5.0（Flink 1.20.x 生态最稳）
 download "org/apache/flink/flink-sql-connector-postgres-cdc/3.5.0/flink-sql-connector-postgres-cdc-3.5.0.jar"

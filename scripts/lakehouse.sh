@@ -7,6 +7,7 @@
 #   fix            修复 Flink 入湖（取消任务、重启、重新执行 flink.sql）
 #   verify         验证埋点数据链路
 #   replay         重放 test_data 中的神策日志
+#   sync-metadata  转换并导入埋点元数据（MySQL -> PG）
 #   reset          清除数据并重建（含 flink.sql、starrocks.sql）
 #   run-sql [flink|starrocks|文件] 执行 SQL（无参数时执行 flink.sql + starrocks.sql）
 #   download-starrocks-jars  仅下载 StarRocks 外部目录依赖
@@ -300,6 +301,19 @@ for j in d.get('jobs',[]):
   echo "  - 发送测试埋点：$0 verify"
 }
 
+cmd_sync_metadata() {
+  echo "=== 1. 生成 PG 元数据脚本 ==="
+  python3 "$PROJECT_DIR/scripts/convert_user_track_mysql_to_pg.py"
+
+  echo ""
+  echo "=== 2. 导入到 PostgreSQL ==="
+  if docker compose ps postgres 2>/dev/null | grep -q "Up"; then
+    docker compose exec -T postgres psql -U paimon -d paimon_db -f /docker-entrypoint-initdb.d/04-init-user-track.sql
+  else
+    echo "PostgreSQL 容器未运行，跳过导入"
+  fi
+}
+
 cmd_reset() {
   echo "=========================================="
   echo "  Lakehouse-track 重置并重建"
@@ -432,6 +446,7 @@ usage() {
   echo "  fix                    修复 Flink 入湖"
   echo "  verify                 验证埋点数据链路（发送测试埋点后检查）"
   echo "  replay                 重放 test_data 中的神策日志"
+  echo "  sync-metadata          转换并导入埋点元数据（MySQL -> PG）"
   echo "  reset                  清除数据并重建（含 flink.sql、starrocks.sql）"
   echo "  run-sql [flink|starrocks]  执行 SQL（无参数时执行 flink.sql + starrocks.sql）"
   echo "  download-starrocks-jars  仅下载 StarRocks 外部目录依赖"
@@ -458,6 +473,9 @@ case "$CMD" in
   replay)
     echo ">>> 开始重放测试日志..."
     python3 "$SCRIPT_DIR/replay_logs.py"
+    ;;
+  sync-metadata)
+    cmd_sync_metadata
     ;;
   reset)
     cmd_reset

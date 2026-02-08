@@ -53,7 +53,8 @@ data:
                           if exists(.time) {
                               .timestamp = .time
                           }
-                          .event_group = if match(string!(.event), r'^(\$|debug_)') { "DEBUG" } else { "CORE" }
+                          # event_group 三分：DEBUG(debug_*) / CORE($ 预置) / TRACE(自定义)
+                          .event_group = if match(string!(.event), r'^debug_') { "DEBUG" } else { if match(string!(.event), r'^\$') { "CORE" } else { "TRACE" } }
                           .is_valid = true
                       }
                   }
