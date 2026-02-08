@@ -2,7 +2,7 @@
 # 避免 bind mount 覆盖整个 lib 导致丢失 flink-dist
 # 构建前需执行: bash flink/scripts/download-jars.sh
 
-FROM flink:1.18.1-scala_2.12
+FROM flink:1.20.3-scala_2.12
 
 # 将自定义 JAR 加入 lib（ADD 而非覆盖）
 COPY --chown=flink:flink flink/lib/*.jar /opt/flink/lib/

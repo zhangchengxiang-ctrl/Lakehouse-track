@@ -6,6 +6,7 @@
 #   install        安装所有依赖（Flink JAR、GeoIP、StarRocks JAR、配置校验）
 #   fix            修复 Flink 入湖（取消任务、重启、重新执行 flink.sql）
 #   verify         验证埋点数据链路
+#   replay         重放 test_data 中的神策日志
 #   reset          清除数据并重建（含 flink.sql、starrocks.sql）
 #   run-sql [flink|starrocks|文件] 执行 SQL（无参数时执行 flink.sql + starrocks.sql）
 #   download-starrocks-jars  仅下载 StarRocks 外部目录依赖
@@ -46,7 +47,24 @@ run_flink_sql() {
   local f=$1
   [ -z "$f" ] && f="flink/flink.sql"
   echo ">>> $f (Flink)"
-  docker compose exec -T flink-jobmanager ./bin/sql-client.sh -f /opt/flink/flink.sql
+
+  # 终极修复：使用“交互模式 stdin”一次性执行整份脚本（单 Session）
+  # 背景：Flink 1.18.1 的 sql-client 在 -f 模式下可能触发 only single statement supported，
+  # 但交互模式可以逐条解析并保持会话态（Catalog/临时表均有效）。
+  docker compose exec -T -e HMS_URI="${HMS_URI:-thrift://hive-metastore:9083}" \
+    flink-jobmanager bash -c \
+    "cp /opt/flink/flink.sql /tmp/run.sql && \
+     HMS_URI=\"\${HMS_URI:-thrift://hive-metastore:9083}\" && \
+     HMS_HOST=\$(echo \"\$HMS_URI\" | sed -E 's#^thrift://([^:/]+).*#\\1#') && \
+     HMS_PORT=\$(echo \"\$HMS_URI\" | sed -E 's#^thrift://[^:/]+:([0-9]+).*#\\1#') && \
+     echo \"  等待 HMS (\$HMS_HOST:\$HMS_PORT)...\" && \
+     for i in \$(seq 1 30); do \
+       (echo > /dev/tcp/\$HMS_HOST/\$HMS_PORT) >/dev/null 2>&1 && break; \
+       sleep 2; \
+     done && \
+     sed -i \"s|thrift://hive-metastore:9083|\${HMS_URI}|g\" /tmp/run.sql && \
+     echo 'QUIT;' >> /tmp/run.sql && \
+     ./bin/sql-client.sh < /tmp/run.sql"
 }
 
 run_starrocks_sql() {
@@ -54,17 +72,43 @@ run_starrocks_sql() {
   [ -z "$f" ] && f="starrocks/starrocks.sql"
   echo ">>> $f (StarRocks)"
   
-  # StarRocks 3.2 部分 DROP 不支持 IF EXISTS，先执行所有 DROP 并忽略错误（首次时对象不存在）
-  # 顺序：先删依赖 catalog 的对象，最后删 catalog
-  for cmd in \
-    "DROP MATERIALIZED VIEW IF EXISTS ods.dws_daily_active_users" \
-    "DROP MATERIALIZED VIEW IF EXISTS ods.dwd_user_full_track" \
-    "DROP RESOURCE GROUP mv_refresh_group" \
-    "DROP DATABASE IF EXISTS ods" \
-    "DROP CATALOG paimon_catalog"; do
-    echo "  执行: $cmd"
-    _run_mysql -e "$cmd" || true
+  # 优化：幂等清理。StarRocks 3.x 某些对象不支持 IF EXISTS，通过 || true 忽略不存在的错误
+  _run_mysql -e "DROP MATERIALIZED VIEW IF EXISTS ods.dws_daily_active_users" 2>/dev/null || true
+  _run_mysql -e "DROP MATERIALIZED VIEW IF EXISTS ods.dwd_user_full_track" 2>/dev/null || true
+  _run_mysql -e "DROP RESOURCE GROUP mv_refresh_group" 2>/dev/null || true
+  _run_mysql -e "DROP DATABASE IF EXISTS ods" 2>/dev/null || true
+  _run_mysql -e "DROP CATALOG paimon_catalog" 2>/dev/null || true
+  
+  echo "  创建 Paimon Catalog..."
+  _run_mysql -e "CREATE EXTERNAL CATALOG paimon_catalog PROPERTIES (\
+    \"type\" = \"paimon\",\
+    \"paimon.catalog.type\" = \"hive\",\
+    \"hive.metastore.uris\" = \"thrift://hive-metastore:9083\",\
+    \"paimon.catalog.warehouse\" = \"s3a://paimon-lake/paimon_data\",\
+    \"aws.s3.endpoint\" = \"http://minio:9000\",\
+    \"aws.s3.access_key\" = \"minioadmin\",\
+    \"aws.s3.secret_key\" = \"minioadmin\",\
+    \"aws.s3.enable_ssl\" = \"false\",\
+    \"aws.s3.enable_path_style_access\" = \"true\"\
+  )" 2>/dev/null || true
+
+  echo "  等待 Paimon 元数据就绪..."
+  for i in $(seq 1 20); do
+    dbs=$(_run_mysql -N -e "SHOW DATABASES FROM paimon_catalog" 2>/dev/null || true)
+    if python - <<'PY' "$dbs"
+import sys
+dbs = sys.argv[1].split()
+sys.exit(0 if "ods" in dbs else 1)
+PY
+    then
+      echo "  ✓ 发现 Paimon 数据库 ods"
+      break
+    fi
+    echo "  等待 ods... ($i/20)"
+    sleep 3
   done
+
+  echo "  等待元数据清理..."
   sleep 2
   _run_mysql < "$f"
 }
@@ -129,7 +173,7 @@ cmd_install() {
   echo ""
   echo "下一步："
   echo "  1. docker compose up -d --build"
-  echo "  2. 在 MinIO 控制台 (http://localhost:9001) 创建 bucket: paimon-lake"
+  echo "  2. 验证数据链路：./scripts/lakehouse.sh verify"
   echo ""
 }
 
@@ -155,8 +199,10 @@ cmd_download_starrocks_jars() {
   }
 
   mkdir -p "$JAR_DIR"
-  download "org/apache/paimon/paimon-bundle/0.9.0/paimon-bundle-0.9.0.jar"
-  download "org/apache/paimon/paimon-s3/0.9.0/paimon-s3-0.9.0.jar"
+  # 清理历史 Paimon JAR（避免 0.8/0.9 混用导致 classpath 冲突）
+  rm -f "$JAR_DIR"/paimon-bundle-*.jar "$JAR_DIR"/paimon-s3-*.jar 2>/dev/null || true
+  download "org/apache/paimon/paimon-bundle/1.3.1/paimon-bundle-1.3.1.jar"
+  download "org/apache/paimon/paimon-s3/1.3.1/paimon-s3-1.3.1.jar"
   echo ""
   echo "✅ StarRocks 依赖 JAR 包下载完成！"
   ls -lh "$JAR_DIR"
@@ -210,15 +256,17 @@ done
 cmd_verify() {
   cd "$PROJECT_DIR"
 
-  echo "=== 0. 发送测试埋点 ==="
-  TEST_URL="http://localhost/sa?data=eyJkaXN0aW5jdF9pZCI6Ijg4OCIsImV2ZW50IjoiVmlld1Byb2R1Y3QiLCJ0eXBlIjoidHJhY2siLCJwcm9wZXJ0Ijp7InByaWNlIjoxMDB9LCJ0aW1lIjoxNzA3MTgwMDAwMDAwfQ=="
-  if curl -sSf --connect-timeout 5 -o /dev/null "$TEST_URL" 2>/dev/null; then
-    echo "  ✓ 已发送（distinct_id=888, event=ViewProduct）"
-    echo "  等待 45 秒让数据流经 Nginx→Vector→MinIO→Flink→Paimon..."
-    sleep 45
+  echo "=== 0. 发送测试埋点 (重放历史日志) ==="
+  if [ -f "$SCRIPT_DIR/replay_logs.py" ]; then
+    python3 "$SCRIPT_DIR/replay_logs.py"
   else
-    echo "  ✗ 请求失败，请确认 Nginx 已启动（docker compose ps nginx）"
+    # 备用方案：发送单条测试埋点
+    TEST_URL="http://localhost/sa?data=eyJkaXN0aW5jdF9pZCI6Ijg4OCIsImV2ZW50IjoiVmlld1Byb2R1Y3QiLCJ0eXBlIjoidHJhY2siLCJwcm9wZXJ0Ijp7InByaWNlIjoxMDB9LCJ0aW1lIjoxNzA3MTgwMDAwMDAwfQ=="
+    curl -sSf --connect-timeout 5 -o /dev/null "$TEST_URL" 2>/dev/null || echo "  ✗ 请求失败"
   fi
+  
+  echo "  等待 45 秒让数据流经 Nginx→Vector→MinIO→Flink→Paimon..."
+  sleep 45
   echo ""
 
   echo "=== 1. Nginx 日志（最近 3 条 sa 请求）==="
@@ -282,9 +330,33 @@ cmd_reset() {
     docker compose exec -T postgres pg_isready -U paimon 2>/dev/null && break
     sleep 5
   done
+  echo "  初始化 Postgres 元数据库（metastore/streampark）..."
+  if ! docker compose exec -T postgres psql -U paimon -d postgres -tAc \
+    "SELECT 1 FROM pg_database WHERE datname = 'metastore'" 2>/dev/null | grep -q 1; then
+    docker compose exec -T postgres psql -U paimon -d postgres -c "CREATE DATABASE metastore" 2>/dev/null || true
+  fi
+  docker compose exec -T postgres psql -U paimon -d postgres -c \
+    "GRANT ALL PRIVILEGES ON DATABASE metastore TO paimon" 2>/dev/null || true
+  if ! docker compose exec -T postgres psql -U paimon -d postgres -tAc \
+    "SELECT 1 FROM pg_database WHERE datname = 'streampark'" 2>/dev/null | grep -q 1; then
+    docker compose exec -T postgres psql -U paimon -d postgres -c "CREATE DATABASE streampark" 2>/dev/null || true
+  fi
+  docker compose exec -T postgres psql -U paimon -d postgres -c \
+    "GRANT ALL PRIVILEGES ON DATABASE streampark TO paimon" 2>/dev/null || true
   echo "  等待 MinIO..."
   sleep 10
-  echo "  （若 MinIO 尚无 bucket paimon-lake，请先在 http://localhost:9001 创建）"
+  # 本项目使用 Hive Metastore，等待 9083 端口就绪，避免 hive CLI 偶发阻塞
+  echo "  等待 Hive Metastore..."
+  for i in $(seq 1 30); do
+    if command -v nc >/dev/null 2>&1; then
+      nc -z -w 2 127.0.0.1 9083 && break
+    else
+      docker compose exec -T hive-metastore bash -c \
+        "command -v nc >/dev/null 2>&1 && nc -z -w 2 127.0.0.1 9083" 2>/dev/null && break
+    fi
+    sleep 5
+  done
+  echo "  MinIO Bucket 已由 minio-init 自动初始化"
 
   echo ""
   echo "[5/6] 等待 Flink 就绪并执行 flink.sql..."
@@ -321,25 +393,26 @@ cmd_run_sql() {
   cd "$PROJECT_DIR"
 
   if [ $# -eq 0 ]; then
-    [ -f "flink/flink.sql" ] && run_flink_sql flink/flink.sql
-    [ -f "starrocks/starrocks.sql" ] && run_starrocks_sql starrocks/starrocks.sql
+    run_flink_sql "flink/flink.sql"
+    run_starrocks_sql "starrocks/starrocks.sql"
   else
     for f in "$@"; do
       case "$f" in
         flink|flink.sql|flink/flink.sql)
-          run_flink_sql "$f"
+          run_flink_sql "flink/flink.sql"
           ;;
         starrocks|starrocks.sql|starrocks/starrocks.sql)
-          run_starrocks_sql starrocks/starrocks.sql
+          run_starrocks_sql "starrocks/starrocks.sql"
           ;;
         *)
           if [ -f "$f" ]; then
             if [[ "$f" == *flink* ]]; then
-              echo ">>> $f (Flink，仅支持 flink/flink.sql)"
-              run_flink_sql
+              run_flink_sql "$f"
             else
               run_starrocks_sql "$f"
             fi
+          else
+            echo "错误: 文件 $f 不存在"
           fi
           ;;
       esac
@@ -358,6 +431,7 @@ usage() {
   echo "  install                安装所有依赖"
   echo "  fix                    修复 Flink 入湖"
   echo "  verify                 验证埋点数据链路（发送测试埋点后检查）"
+  echo "  replay                 重放 test_data 中的神策日志"
   echo "  reset                  清除数据并重建（含 flink.sql、starrocks.sql）"
   echo "  run-sql [flink|starrocks]  执行 SQL（无参数时执行 flink.sql + starrocks.sql）"
   echo "  download-starrocks-jars  仅下载 StarRocks 外部目录依赖"
@@ -380,6 +454,10 @@ case "$CMD" in
     ;;
   verify)
     cmd_verify
+    ;;
+  replay)
+    echo ">>> 开始重放测试日志..."
+    python3 "$SCRIPT_DIR/replay_logs.py"
     ;;
   reset)
     cmd_reset

@@ -11,16 +11,111 @@ sources:
     read_from: "beginning"
 
 transforms:
-  # 1. 神策协议解码 + UA 解析
+  # 1. Nginx 日志解析 + 神策协议初步解码
   sa_decode:
     type: "remap"
     inputs: ["nginx_logs"]
     source: |
-      parsed, err = parse_json(.message)
+      # 解析 Nginx 原始行 (StellarTrace 格式)
+      pattern = r'^"(?P<proxy_add_x_forwarded_for>[^"]*)" \+\+_ "(?P<msec>[^"]*)" \+\+_ "(?P<request_method>[^"]*)" \+\+_ "(?P<arg_gzip>[^"]*)" \+\+_ "(?P<arg_data>[^"]*)" \+\+_ "(?P<arg_data_list>[^"]*)" \+\+_ "(?P<request_body>[^"]*)" \+\+_ "(?P<http_user_agent>[^"]*)" \+\+_ "(?P<arg_project>[^"]*)" \+\+_ "(?P<http_cookie>[^"]*)" \+\+_ "(?P<arg_token>[^"]*)" \+\+_ "(?P<arg_ext>[^"]*)"'
+      
+      parsed_nginx, err = parse_regex(.message, pattern)
       if err == null {
-          . = parsed
-          # 解析 User-Agent
-          if exists(.http_user_agent) {
+          . = parsed_nginx
+          
+          # 提取远程地址
+          if exists(.proxy_add_x_forwarded_for) && .proxy_add_x_forwarded_for != "-" {
+              ips, err = split(.proxy_add_x_forwarded_for, ",")
+              if err == null && length(ips) > 0 {
+                  cleaned_ip, err = strip_whitespace(ips[0])
+                  if err == null {
+                      .remote_addr = cleaned_ip
+                  }
+              }
+          }
+
+          # 确定神策数据源
+          raw_data = ""
+          if .request_method == "POST" {
+              if exists(.request_body) && .request_body != "-" {
+                  body_parts, err = parse_key_value(.request_body)
+                  if err == null {
+                      raw_data = if exists(body_parts.data_list) { body_parts.data_list } else { body_parts.data }
+                      if exists(body_parts.gzip) { .arg_gzip = body_parts.gzip }
+                  }
+              }
+          } else if .request_method == "GET" {
+              raw_data = if .arg_data != "-" { .arg_data } else { .arg_data_list }
+          }
+
+          # 解码神策数据
+          if raw_data != "" && raw_data != "-" {
+              if is_string(raw_data) {
+                  raw_data = replace!(raw_data, "-", "%")
+              } else {
+                  raw_data = ""
+              }
+              decoded_raw = decode_percent(raw_data)
+              raw_data = decoded_raw
+
+              decoded_text, err = decode_base64(raw_data)
+              if err == null {
+                  if .arg_gzip == "1" {
+                      decoded_text, err = decode_gzip(decoded_text)
+                  }
+
+                  if err == null {
+                      .sa_payloads, err = parse_json(decoded_text)
+                      # 如果解析失败，标记为脏数据
+                      if err != null {
+                          .is_valid = false
+                          .error_type = "json_parse_error"
+                      }
+                  } else {
+                      .is_valid = false
+                      .error_type = "gzip_decode_error"
+                  }
+              } else {
+                  .is_valid = false
+                  .error_type = "base64_decode_error"
+              }
+          }
+      } else {
+          .is_valid = false
+          .error_type = "nginx_regex_mismatch"
+      }
+
+  # 2. 展开多条事件 (使用 unnest 函数)
+  sa_unnest:
+    type: "remap"
+    inputs: ["sa_decode"]
+    source: |
+      if is_array(.sa_payloads) {
+          . = unnest!(.sa_payloads)
+      }
+
+  # 3. 字段标准化与清洗
+  sa_normalize:
+    type: "remap"
+    inputs: ["sa_unnest"]
+    source: |
+      # unnest 之后，原来的 .sa_payloads 会变成单条对象
+      if exists(.sa_payloads) && is_object(.sa_payloads) {
+          payload = .sa_payloads
+          
+          .distinct_id = payload.distinct_id
+          .event = payload.event
+          .type = payload.type
+          .project = if exists(payload.project) { payload.project } else { .arg_project }
+          .properties = if exists(payload.properties) && is_object(payload.properties) { payload.properties } else { {} }
+          
+          # 合并 lib 信息
+          if exists(payload.lib) && is_object(payload.lib) {
+              .properties = merge!(.properties, payload.lib)
+          }
+
+          # 解析 User-Agent (仅在 normalize 阶段解析一次，节省 CPU)
+          if exists(.http_user_agent) && .http_user_agent != "-" {
               ua, err = parse_user_agent(.http_user_agent)
               if err == null {
                   .ua_browser = if exists(ua.browser) { ua.browser.name } else { null }
@@ -28,48 +123,70 @@ transforms:
                   .ua_device = if exists(ua.device) { ua.device.family } else { null }
               }
           }
-          
-          if exists(.sa_data) {
-              # 解码神策 Base64 数据
-              decoded_str, err = decode_base64(.sa_data)
+
+          # 时间处理
+          event_time_ms = 0
+          if exists(payload.time) {
+              time_val, err = to_int(payload.time)
               if err == null {
-                  sa_payload, err = parse_json(decoded_str)
+                  event_time_ms = time_val
+              } else if exists(.msec) {
+                  msec_val, err = to_float(.msec)
                   if err == null {
-                      .distinct_id = sa_payload.distinct_id
-                      .event = sa_payload.event
-                      .type = sa_payload.type
-                      .properties = if sa_payload.properties != null { encode_json(sa_payload.properties) } else { "{}" }
-                      .project = sa_payload.project
-                      if exists(sa_payload.time) {
-                          .time = from_unix_timestamp!(to_int!(sa_payload.time), unit: "milliseconds")
-                      } else if exists(.time) {
-                          .time = parse_timestamp!(.time, format: "%+")
-                      }
-                      if exists(.time) {
-                          .timestamp = .time
-                      }
-                      .event_group = if match(string!(.event), r'^(\$|debug_)') { "DEBUG" } else { "CORE" }
-                      .is_valid = true
+                      event_time_ms = to_int(msec_val * 1000.0)
+                  }
+              }
+          } else if exists(.msec) {
+              msec_val, err = to_float(.msec)
+              if err == null {
+                  event_time_ms = to_int(msec_val * 1000.0)
+              }
+          }
+          
+          if event_time_ms > 0 {
+              .time = from_unix_timestamp!(event_time_ms, unit: "milliseconds")
+              .timestamp = .time
+              .dt = format_timestamp!(.time, format: "%Y-%m-%d")
+              .hour = format_timestamp!(.time, format: "%H")
+          }
+
+          .event_group = if match(string!(.event), r'^(\$|debug_)') { "DEBUG" } else { "CORE" }
+          .is_valid = if exists(.distinct_id) { true } else { false }
+          
+          # 清理中间字段
+          del(.sa_payloads)
+      } else if is_object(.) && exists(.distinct_id) {
+          # 处理非数组（单条）的情况，sa_unnest 可能直接透传了对象
+          if !exists(.time) && exists(.msec) {
+              msec_val, err = to_float(.msec)
+              if err == null {
+                  event_time_ms = to_int(msec_val * 1000.0)
+                  if event_time_ms > 0 {
+                      .time = from_unix_timestamp!(event_time_ms, unit: "milliseconds")
+                      .timestamp = .time
+                      .dt = format_timestamp!(.time, format: "%Y-%m-%d")
+                      .hour = format_timestamp!(.time, format: "%H")
                   }
               }
           }
+          .is_valid = true
       }
 
-  # 2. 早期过滤：仅处理有 sa_data 的埋点请求，避免对 /、/api 等非埋点请求做无效处理
+
+  # 2. 早期过滤
   filter_sa_only:
     type: "filter"
-    inputs: ["sa_decode"]
+    inputs: ["sa_normalize"]
     condition: 'exists(.distinct_id)'
 
-  # 3. IP 解析占位（GeoIP 需 lakehouse.sh install 后启用 enrichment_tables）
+  # 3. IP 解析占位
   ip_geoip:
     type: "remap"
     inputs: ["filter_sa_only"]
     source: |
       .geoip = null
 
-  # 4. 最终校验逻辑 + geoip 转 STRING（Flink 期望）
-  # 注：redis transform 已移除，白名单校验可改在 Flink 层实现
+  # 4. 最终校验逻辑
   final_check:
     type: "remap"
     inputs: ["ip_geoip"]
@@ -77,6 +194,9 @@ transforms:
       .redis_meta = null
       if exists(.geoip) && is_object(.geoip) {
           .geoip = encode_json(.geoip)
+      }
+      if exists(.properties) && is_object(.properties) {
+          .properties = encode_json(.properties)
       }
 
   # 6. 过滤：仅保留有效埋点（有 sa_data 且解析成功），避免无埋点请求写入 S3
@@ -98,18 +218,18 @@ sinks:
     compression: "none"
     encoding:
       codec: "json"
-      only_fields: ["time", "distinct_id", "event", "type", "project", "properties", "ua_browser", "ua_os", "geoip", "redis_meta", "remote_addr", "event_group"]
+      only_fields: ["time", "distinct_id", "event", "type", "project", "properties", "ua_browser", "ua_os", "ua_device", "geoip", "redis_meta", "remote_addr", "event_group"]
     # Flink FileSystem JSON 期望 JSONL（每行一个 JSON），而非 JSON 数组
     framing:
       method: "character_delimited"
       character_delimited:
         delimiter: "\n"
-    key_prefix: "staging/dt=%F/"
+    key_prefix: "staging/dt={{dt}}/hour={{hour}}/"
     buffer:
       type: "disk"
       max_size: 107374182400
       when_full: "block"
     batch:
       max_bytes: 104857600
-      max_events: 50           # 低流量时按条数 flush
-      timeout_secs: 10         # 定期 flush，避免单条 curl 后长时间无数据
+      max_events: 1000          # 增加批大小，减少小文件
+      timeout_secs: 60          # 延长 flush 间隔，减少小文件生成

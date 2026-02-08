@@ -4,19 +4,7 @@
 
 -- ========== 1. 挂载 Paimon ==========
 SET new_planner_optimize_timeout = 30000;
-
--- DROP CATALOG 由 run-sql 在脚本中先执行（StarRocks 3.2 不支持 IF EXISTS）
-CREATE EXTERNAL CATALOG paimon_catalog
-PROPERTIES (
-    "type" = "paimon",
-    "paimon.catalog.type" = "filesystem",
-    "paimon.catalog.warehouse" = "s3://paimon-lake/data/",
-    "aws.s3.endpoint" = "http://minio:9000",
-    "aws.s3.access_key" = "minioadmin",
-    "aws.s3.secret_key" = "minioadmin",
-    "aws.s3.enable_ssl" = "false",
-    "aws.s3.enable_path_style_access" = "true"
-);
+-- 外部 Catalog 由 run-sql 脚本创建并等待元数据就绪
 
 -- ========== 2. 视图与物化视图 ==========
 SET GLOBAL enable_scan_datacache = true;
@@ -25,7 +13,7 @@ CREATE DATABASE IF NOT EXISTS ods;
 
 CREATE VIEW ods.dim_orders (order_id, user_id, amount, created_at) AS
 SELECT order_id, user_id, amount, created_at
-FROM paimon_catalog.`default`.ods_orders_cdc;
+FROM paimon_catalog.ods.ods_orders_cdc;
 
 CREATE TABLE ods.dim_user_mapping (
     user_id VARCHAR(64) NOT NULL,
@@ -37,13 +25,22 @@ DISTRIBUTED BY HASH(user_id) BUCKETS 1;
 
 CREATE VIEW ods.ods_events (
     `time`, distinct_id, `event`, `type`, project, properties,
-    ua_browser, ua_os, geoip, redis_meta, remote_addr, event_group, dt
+    ua_browser, ua_os, ua_device, geoip, redis_meta, remote_addr, event_group, dt
 ) AS
-SELECT * FROM paimon_catalog.`default`.ods_events_core
+SELECT
+    `time`, distinct_id, `event`, `type`, project, properties,
+    ua_browser, ua_os, ua_device, geoip, redis_meta, remote_addr, event_group, dt
+FROM paimon_catalog.ods.ods_events_core
 UNION ALL
-SELECT * FROM paimon_catalog.`default`.ods_events_trace
+SELECT
+    `time`, distinct_id, `event`, `type`, project, properties,
+    ua_browser, ua_os, ua_device, geoip, redis_meta, remote_addr, event_group, dt
+FROM paimon_catalog.ods.ods_events_trace
 UNION ALL
-SELECT * FROM paimon_catalog.`default`.ods_events_debug;
+SELECT
+    `time`, distinct_id, `event`, `type`, project, properties,
+    ua_browser, ua_os, ua_device, geoip, redis_meta, remote_addr, event_group, dt
+FROM paimon_catalog.ods.ods_events_debug;
 
 CREATE RESOURCE GROUP mv_refresh_group
 TO (db='ods')

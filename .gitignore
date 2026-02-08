@@ -1,5 +1,6 @@
 # ========== 数据与持久化 (CRITICAL) ==========
 data/
+test_data/
 **/data/
 *.db
 *.db-*
