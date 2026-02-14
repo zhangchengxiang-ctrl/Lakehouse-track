@@ -1,115 +1,361 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: vector-config
-  namespace: paimon-lab
+  name: vector-scale-config
+  namespace: lakehouse-track
 data:
   vector.yaml: |
-    # GeoIP 可选：需下载 GeoLite2-City.mmdb 后取消注释
-    # enrichment_tables:
-    #   geoip_table:
-    #     type: "geoip"
-    #     path: "/var/lib/vector/GeoLite2-City.mmdb"
+    # Vector Scale 配置 — K8s 版本
+    # 环境变量由 Deployment 注入
+
+    enrichment_tables:
+      geoip_table:
+        type: "geoip"
+        path: "/etc/vector/geoip/GeoLite2-City.mmdb"
+
+      projects_table:
+        type: "file"
+        file:
+          path: "/data/meta/projects.csv"
+          encoding:
+            type: "csv"
+        schema:
+          project_name: "string"
+          is_auto_create: "integer"
+
+      events_table:
+        type: "file"
+        file:
+          path: "/data/meta/valid_events.csv"
+          encoding:
+            type: "csv"
+        schema:
+          project_name: "string"
+          event_name: "string"
+          accepted: "integer"
+
+      properties_table:
+        type: "file"
+        file:
+          path: "/data/meta/valid_properties.csv"
+          encoding:
+            type: "csv"
+        schema:
+          project_name: "string"
+          property_name: "string"
+          data_type: "integer"
 
     sources:
       nginx_logs:
         type: "file"
-        include: ["/var/log/nginx/access.log"]
+        include:
+          - "/var/log/nginx/access.log"
+          - "/var/log/nginx/access.log.1"
         read_from: "beginning"
+        data_dir: "/var/lib/vector"
 
     transforms:
-      # 1. 神策协议解码 + UA 解析
       sa_decode:
         type: "remap"
         inputs: ["nginx_logs"]
         source: |
-          parsed, err = parse_json(.message)
+          pattern = r'^"(?P<proxy_add_x_forwarded_for>[^"]*)" \+\+_ "(?P<msec>[^"]*)" \+\+_ "(?P<request_method>[^"]*)" \+\+_ "(?P<arg_gzip>[^"]*)" \+\+_ "(?P<arg_data>[^"]*)" \+\+_ "(?P<arg_data_list>[^"]*)" \+\+_ "(?P<request_body>[^"]*)" \+\+_ "(?P<http_user_agent>[^"]*)" \+\+_ "(?P<arg_project>[^"]*)" \+\+_ "(?P<http_cookie>[^"]*)" \+\+_ "(?P<arg_token>[^"]*)" \+\+_ "(?P<arg_ext>[^"]*)"'
+          parsed_nginx, err = parse_regex(.message, pattern)
           if err == null {
-              . = parsed
-              if exists(.http_user_agent) {
-                  ua, err = parse_user_agent(.http_user_agent)
-                  if err == null {
-                      .ua_browser = if exists(ua.browser) { ua.browser.name } else { null }
-                      .ua_os = if exists(ua.os) { ua.os.name } else { null }
-                      .ua_device = if exists(ua.device) { ua.device.family } else { null }
+              . = parsed_nginx
+              if exists(.proxy_add_x_forwarded_for) && .proxy_add_x_forwarded_for != "-" {
+                  ips, err = split(.proxy_add_x_forwarded_for, ",")
+                  if err == null && length(ips) > 0 {
+                      cleaned_ip, err = strip_whitespace(ips[0])
+                      if err == null { .remote_addr = cleaned_ip }
                   }
               }
-              
-              if exists(.sa_data) {
-                  decoded_str, err = decode_base64(.sa_data)
-                  if err == null {
-                      sa_payload, err = parse_json(decoded_str)
+              raw_data = ""
+              if .request_method == "POST" {
+                  if exists(.request_body) && .request_body != "-" {
+                      body_parts, err = parse_key_value(.request_body)
                       if err == null {
-                          .distinct_id = sa_payload.distinct_id
-                          .event = sa_payload.event
-                          .type = sa_payload.type
-                          .properties = if sa_payload.properties != null { encode_json(sa_payload.properties) } else { "{}" }
-                          .project = sa_payload.project
-                          if exists(sa_payload.time) {
-                              .time = from_unix_timestamp!(to_int!(sa_payload.time), unit: "milliseconds")
-                          } else if exists(.time) {
-                              .time = parse_timestamp!(.time, format: "%+")
+                          raw_data = if exists(body_parts.data_list) { body_parts.data_list } else { body_parts.data }
+                          if exists(body_parts.gzip) { .arg_gzip = body_parts.gzip }
+                      }
+                  }
+              } else if .request_method == "GET" {
+                  raw_data = if .arg_data != "-" { .arg_data } else { .arg_data_list }
+              }
+              if raw_data != "" && raw_data != "-" {
+                  if is_string(raw_data) { raw_data = replace!(raw_data, "-", "%") } else { raw_data = "" }
+                  decoded_raw = decode_percent(raw_data)
+                  raw_data = decoded_raw
+                  decoded_text, err = decode_base64(raw_data)
+                  if err == null {
+                      if .arg_gzip == "1" { decoded_text, err = decode_gzip(decoded_text) }
+                      if err == null {
+                          .sa_payloads, err = parse_json(decoded_text)
+                          if err != null { .is_valid = false; .error_type = "json_parse_error" }
+                      } else { .is_valid = false; .error_type = "gzip_decode_error" }
+                  } else { .is_valid = false; .error_type = "base64_decode_error" }
+              }
+          } else { .is_valid = false; .error_type = "nginx_regex_mismatch" }
+
+      sa_unnest:
+        type: "remap"
+        inputs: ["sa_decode"]
+        source: |
+          if is_array(.sa_payloads) { . = unnest!(.sa_payloads) }
+
+      sa_normalize:
+        type: "remap"
+        inputs: ["sa_unnest"]
+        source: |
+          if exists(.sa_payloads) && is_object(.sa_payloads) {
+              payload = .sa_payloads
+              .distinct_id = payload.distinct_id
+              .event = payload.event
+              .type = payload.type
+              .project = if exists(payload.project) { payload.project } else { .arg_project }
+              .properties = if exists(payload.properties) && is_object(payload.properties) { payload.properties } else { {} }
+              if exists(payload.lib) && is_object(payload.lib) { .properties = merge!(.properties, payload.lib) }
+              login_id = if exists(payload.login_id) { payload.login_id } else { null }
+              anonymous_id = if exists(payload.anonymous_id) { payload.anonymous_id } else { null }
+              original_id = if exists(payload.original_id) { payload.original_id } else { null }
+              is_login = false
+              final_id = .distinct_id
+              valid_id = false
+              if is_string(login_id) && login_id != "" && login_id != "-1" { final_id = login_id; is_login = true; valid_id = true }
+              else if is_string(anonymous_id) && anonymous_id != "" && anonymous_id != "-1" { final_id = anonymous_id; valid_id = true }
+              else if is_string(.distinct_id) && .distinct_id != "" && .distinct_id != "-1" { valid_id = true }
+              if valid_id {
+                  .distinct_id = final_id
+                  .properties."$$is_login_id" = is_login
+                  if is_string(login_id) { .login_id = login_id }
+                  if is_string(anonymous_id) { .anonymous_id = anonymous_id }
+                  if is_string(original_id) { .original_id = original_id }
+              } else { .is_valid = false; .error_type = "invalid_distinct_id" }
+              if exists(.type) && .type == "track_signup" && is_string(original_id) && original_id != "" {
+                  .properties."$$track_signup_original_id" = original_id
+                  .properties."$$is_login_id" = true
+              }
+              if exists(.type) && .type == "track_id_bind" {
+                  if is_string(login_id) && login_id != "" && login_id != "-1" {
+                      .distinct_id = login_id
+                      .properties."$$is_login_id" = true
+                      if is_string(original_id) && original_id != "" { .properties."$$track_id_bind_original_id" = original_id }
+                  }
+              } else if exists(.type) && .type == "track_id_unbind" {
+                  if is_string(original_id) && original_id != "" { .distinct_id = original_id; .properties."$$is_login_id" = false }
+              }
+              if exists(.properties."$$os") && is_string(.properties."$$os") {
+                  os_name = downcase(strip_whitespace!(.properties."$$os"))
+                  if os_name == "iphone os" || os_name == "ios" { .properties."$$os" = "iOS" }
+                  else if os_name == "android" { .properties."$$os" = "Android" }
+              }
+              if exists(.properties."$$os") && .properties."$$os" == "Android" && exists(.properties."$$os_version") && is_string(.properties."$$os_version") {
+                  os_ver = strip_whitespace!(.properties."$$os_version")
+                  if os_ver == "8.0" { .properties."$$os_version" = "8.0.0" }
+                  else if os_ver == "8.1" { .properties."$$os_version" = "8.1.0" }
+              }
+              if exists(.properties."$$lib") && is_string(.properties."$$lib") && exists(.properties."$$url") && is_string(.properties."$$url") {
+                  lib_name = downcase(strip_whitespace!(.properties."$$lib"))
+                  if lib_name == "js" || lib_name == "javascript" {
+                      parsed_url, err = parse_url(.properties."$$url")
+                      if err == null && exists(parsed_url.host) { .properties."$$url_host" = parsed_url.host }
+                  }
+              }
+              if exists(.type) && (.type == "profile_set" || .type == "profile_set_once") {
+                  del(.properties."$$device_id_list")
+                  del(.properties."$$is_deleted")
+              }
+              if exists(.type) && (.type == "profile_set" || .type == "profile_set_once") {
+                  if exists(.properties."$$first_visit_time") && exists(.properties."$$lib") && is_string(.properties."$$lib") {
+                      lib_name = downcase(strip_whitespace!(.properties."$$lib"))
+                      if lib_name == "js" || lib_name == "javascript" {
+                          if exists(.msec) {
+                              msec_val, err = to_float(.msec)
+                              if err == null {
+                                  first_time_ms = to_int(msec_val * 1000.0)
+                                  if first_time_ms > 0 {
+                                      first_ts = from_unix_timestamp!(first_time_ms, unit: "milliseconds")
+                                      .properties."$$first_visit_time" = format_timestamp!(first_ts, format: "%Y-%m-%d %H:%M:%S.%3f")
+                                  }
+                              }
                           }
-                          if exists(.time) {
-                              .timestamp = .time
-                          }
-                          # event_group 三分：DEBUG(debug_*) / CORE($ 预置) / TRACE(自定义)
-                          .event_group = if match(string!(.event), r'^debug_') { "DEBUG" } else { if match(string!(.event), r'^\$') { "CORE" } else { "TRACE" } }
-                          .is_valid = true
                       }
                   }
               }
+              if exists(.properties.event_duration) {
+                  dur, err = to_float(.properties.event_duration)
+                  if err == null && dur >= 0.0 { .properties."$$event_duration" = .properties.event_duration }
+                  del(.properties.event_duration)
+              }
+              if is_object(.properties) { props_keys, err = keys(.properties); if err == null { .properties_keys = props_keys } }
+              if exists(.http_user_agent) && .http_user_agent != "-" {
+                  ua_str = string!(.http_user_agent)
+                  if !exists(.properties."$$user_agent") { .properties."$$user_agent" = ua_str }
+                  if !match(ua_str, r'^SensorsAnalytics') {
+                      ua, err = parse_user_agent(.http_user_agent)
+                      if err == null {
+                          .ua_browser = if exists(ua.browser) { ua.browser.name } else { null }
+                          .ua_os = if exists(ua.os) { ua.os.name } else { null }
+                          .ua_device = if exists(ua.device) { ua.device.family } else { null }
+                          if exists(ua.os) {
+                              if exists(ua.os.name) && !exists(.properties."$$os") { .properties."$$os" = ua.os.name }
+                              if exists(ua.os.version) && !exists(.properties."$$os_version") { .properties."$$os_version" = ua.os.version }
+                          }
+                          if exists(ua.browser) {
+                              if exists(ua.browser.name) && !exists(.properties."$$browser") { .properties."$$browser" = ua.browser.name }
+                              if exists(ua.browser.version) && !exists(.properties."$$browser_version") { .properties."$$browser_version" = ua.browser.version }
+                          }
+                          if exists(ua.device) {
+                              if exists(ua.device.brand) && !exists(.properties."$$manufacturer") { .properties."$$manufacturer" = ua.device.brand }
+                              if exists(ua.device.model) && !exists(.properties."$$model") { .properties."$$model" = ua.device.model }
+                              if exists(ua.device.category) && !exists(.properties."$$device_type") { .properties."$$device_type" = ua.device.category }
+                          }
+                      }
+                  }
+                  if match(downcase(ua_str), r'(bot|crawler|spider|scrapy)') { .properties."$$bot_name" = "bot" }
+              }
+              event_time_ms = 0
+              if exists(payload.time) {
+                  time_val, err = to_int(payload.time)
+                  if err == null { event_time_ms = time_val }
+                  else if exists(.msec) { msec_val, err = to_float(.msec); if err == null { event_time_ms = to_int(msec_val * 1000.0) } }
+              } else if exists(.msec) { msec_val, err = to_float(.msec); if err == null { event_time_ms = to_int(msec_val * 1000.0) } }
+              if event_time_ms > 0 {
+                  .time = from_unix_timestamp!(event_time_ms, unit: "milliseconds")
+                  .timestamp = .time
+                  .dt = format_timestamp!(.time, format: "%Y-%m-%d")
+                  .hour = format_timestamp!(.time, format: "%H")
+              }
+              .event_group = if match(string!(.event), r'^debug_') { "DEBUG" } else { if match(string!(.event), r'^\$$') { "CORE" } else { "TRACE" } }
+              .is_valid = if exists(.distinct_id) { true } else { false }
+              del(.sa_payloads)
+          } else if is_object(.) && exists(.distinct_id) {
+              if !exists(.time) && exists(.msec) {
+                  msec_val, err = to_float(.msec)
+                  if err == null {
+                      event_time_ms = to_int(msec_val * 1000.0)
+                      if event_time_ms > 0 {
+                          .time = from_unix_timestamp!(event_time_ms, unit: "milliseconds")
+                          .timestamp = .time
+                          .dt = format_timestamp!(.time, format: "%Y-%m-%d")
+                          .hour = format_timestamp!(.time, format: "%H")
+                      }
+                  }
+              }
+              .is_valid = true
           }
 
-      # 2. 早期过滤：仅处理有 sa_data 的埋点请求
       filter_sa_only:
         type: "filter"
-        inputs: ["sa_decode"]
+        inputs: ["sa_normalize"]
         condition: 'exists(.distinct_id)'
 
-      # 3. IP 解析占位（GeoIP 需 GeoLite2-City.mmdb 后启用 enrichment_tables）
       ip_geoip:
         type: "remap"
         inputs: ["filter_sa_only"]
         source: |
-          .geoip = null
+          if !exists(.properties) || !is_object(.properties) { .properties = {} }
+          if (!exists(.properties."$$ip") || .properties."$$ip" == "") && exists(.remote_addr) { .properties."$$ip" = .remote_addr }
+          if exists(.properties."$$ip") && is_string(.properties."$$ip") && .properties."$$ip" != "" {
+              geo_record, err = get_enrichment_table_record(table: "geoip_table", condition: {"ip": .properties."$$ip"})
+              if err == null && is_object(geo_record) {
+                  .geoip = geo_record
+                  if (!exists(.properties."$$country") || .properties."$$country" == "") && exists(geo_record.country_name) { .properties."$$country" = geo_record.country_name }
+                  if (!exists(.properties."$$province") || .properties."$$province" == "") && exists(geo_record.region_name) { .properties."$$province" = geo_record.region_name }
+                  if (!exists(.properties."$$city") || .properties."$$city" == "") && exists(geo_record.city_name) { .properties."$$city" = geo_record.city_name }
+              }
+          }
 
-      # 4. 最终校验逻辑 + geoip 转 STRING（Flink 期望）
-      # 注：redis transform 已移除，白名单校验可改在 Flink 层实现
-      final_check:
+      meta_validate:
         type: "remap"
         inputs: ["ip_geoip"]
         source: |
-          .redis_meta = null
-          if exists(.geoip) && is_object(.geoip) {
-              .geoip = encode_json(.geoip)
+          .is_new_event = false
+          .is_new_props = false
+          if exists(.project) && is_string(.project) && exists(.event) && is_string(.event) {
+              project_rec, perr = get_enrichment_table_record(table: "projects_table", condition: { "project_name": string!(.project) })
+              if perr != null { .is_new_event = true; .is_new_props = true }
+              else {
+                  event_rec, eerr = get_enrichment_table_record(table: "events_table", condition: { "project_name": string!(.project), "event_name": string!(.event) })
+                  if eerr != null { .is_new_event = true; .is_new_props = true }
+              }
           }
 
-      # 5. 过滤：仅保留有效埋点
+      final_check:
+        type: "remap"
+        inputs: ["meta_validate"]
+        source: |
+          .redis_meta = null
+          if exists(.geoip) && is_object(.geoip) { .geoip = encode_json(.geoip) }
+          if exists(.properties) && is_object(.properties) { .properties = encode_json(.properties) }
+          if exists(.properties_keys) && is_array(.properties_keys) { .properties_keys_json = encode_json(.properties_keys) }
+
       filter_valid:
         type: "filter"
         inputs: ["final_check"]
         condition: '.is_valid == true'
 
+      format_meta_payload:
+        type: "remap"
+        inputs: ["filter_valid"]
+        source: |
+          if .is_new_event == true || .is_new_props == true {
+              . = { "project": .project, "event": .event, "type": .type, "distinct_id": .distinct_id, "login_id": .login_id, "original_id": .original_id, "properties": .properties, "properties_keys": .properties_keys }
+          } else { abort }
+
     sinks:
-      to_minio:
+      to_s3:
         type: "aws_s3"
         inputs: ["filter_valid"]
-        bucket: "paimon-lake"
-        endpoint: "http://minio:9000"
-        region: "us-east-1"
+        bucket: "${S3_BUCKET:-lakehouse}"
+        endpoint: "${S3_ENDPOINT:-http://minio:9000}"
+        region: "${S3_REGION:-us-east-1}"
         auth:
-          access_key_id: "minioadmin"
-          secret_access_key: "minioadmin"
-        compression: "none"
+          access_key_id: "${S3_ACCESS_KEY:-minioadmin}"
+          secret_access_key: "${S3_SECRET_KEY:-minioadmin}"
+        compression: "gzip"
+        content_type: "application/x-ndjson"
         encoding:
           codec: "json"
-        key_prefix: "staging/dt=%F/"
+          only_fields: ["time","distinct_id","login_id","anonymous_id","original_id","event","type","project","properties","properties_keys","ua_browser","ua_os","ua_device","geoip","redis_meta","remote_addr","event_group","dt","hour"]
+        framing:
+          method: "character_delimited"
+          character_delimited:
+            delimiter: "\n"
+        key_prefix: "track/events/dt={{ dt }}/hour={{ hour }}/"
+        filename_append_uuid: true
+        filename_extension: "jsonl.gz"
+        batch:
+          max_bytes: 268435456
+          max_events: 500000
+          timeout_secs: 120
         buffer:
           type: "disk"
-          max_size: 107374182400
+          max_size: 10737418240
           when_full: "block"
+
+      to_meta_api:
+        type: "http"
+        inputs: ["format_meta_payload"]
+        uri: "${META_API_URL:-http://meta-api:3000/register}"
+        method: "post"
+        encoding:
+          codec: "json"
+        framing:
+          method: "character_delimited"
+          character_delimited:
+            delimiter: "\n"
         batch:
-          max_bytes: 104857600
-          max_events: 50
+          max_events: 200
           timeout_secs: 10
+        buffer:
+          type: "disk"
+          max_size: 536870912
+          when_full: "block"
+        request:
+          headers:
+            Content-Type: "application/x-ndjson"
+          retry_max_duration_secs: 60
+          retry_initial_backoff_secs: 2
+          rate_limit_num: 20
+          rate_limit_duration_secs: 1

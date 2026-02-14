@@ -77,7 +77,7 @@ ls -lh
 
 echo ""
 echo "📦 Hive Metastore S3 依赖（独立目录）..."
-HMS_LIB_DIR="$FLINK_DIR/../hive/hms-lib"
+HMS_LIB_DIR="$FLINK_DIR/../hive/lib"
 mkdir -p "$HMS_LIB_DIR"
 cd "$HMS_LIB_DIR"
 download "org/apache/hadoop/hadoop-aws/3.1.0/hadoop-aws-3.1.0.jar"

@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: meta-sync-script
+  namespace: lakehouse-track
+data:
+  meta_sync.sh: |
+    #!/bin/bash
+    set -e
+
+    META_DIR="/data/meta"
+    INTERVAL="${META_SYNC_INTERVAL:-30}"
+
+    PG_HOST="${PG_HOST:-postgres}"
+    PG_PORT="${PG_PORT:-5432}"
+    PG_USER="${PG_USER:-paimon}"
+    PG_DB="${PG_DB:-paimon_db}"
+    export PGPASSWORD="${PG_PASSWORD:-paimon123}"
+
+    PG_CONN="-h $PG_HOST -p $PG_PORT -U $PG_USER -d $PG_DB"
+
+    mkdir -p "$META_DIR"
+
+    sync_once() {
+        {
+            echo "project_name,is_auto_create"
+            psql $PG_CONN -t -A -F',' -c \
+                "SELECT name, is_auto_create FROM user_track.project WHERE status = 1" 2>/dev/null || true
+        } > "${META_DIR}/projects.csv.tmp"
+        mv -f "${META_DIR}/projects.csv.tmp" "${META_DIR}/projects.csv"
+
+        {
+            echo "project_name,event_name,accepted"
+            psql $PG_CONN -t -A -F',' -c \
+                "SELECT p.name, e.name, e.accepted
+                 FROM user_track.event_define e
+                 JOIN user_track.project p ON e.project_id = p.id
+                 WHERE p.status = 1" 2>/dev/null || true
+        } > "${META_DIR}/valid_events.csv.tmp"
+        mv -f "${META_DIR}/valid_events.csv.tmp" "${META_DIR}/valid_events.csv"
+
+        {
+            echo "project_name,property_name,data_type"
+            psql $PG_CONN -t -A -F',' -c \
+                "SELECT p.name, pd.name, pd.data_type
+                 FROM user_track.property_define pd
+                 JOIN user_track.project p ON pd.project_id = p.id
+                 WHERE p.status = 1 AND pd.is_in_use = 1" 2>/dev/null || true
+        } > "${META_DIR}/valid_properties.csv.tmp"
+        mv -f "${META_DIR}/valid_properties.csv.tmp" "${META_DIR}/valid_properties.csv"
+
+        echo "[meta-sync] $(date '+%H:%M:%S') sync done"
+    }
+
+    if [ "$1" = "--once" ]; then
+        sync_once
+        exit 0
+    fi
+
+    while true; do
+        sync_once
+        sleep "$INTERVAL"
+    done

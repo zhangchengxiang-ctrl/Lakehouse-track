@@ -1,0 +1,142 @@
+# ============================================================
+# K8s Services for Lakehouse-track Scale
+# ============================================================
+
+---
+# Collection Service — SDK 入口（LoadBalancer / NodePort）
+apiVersion: v1
+kind: Service
+metadata:
+  name: collection
+  namespace: lakehouse-track
+  labels:
+    app: collection
+spec:
+  type: LoadBalancer
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      protocol: TCP
+  selector:
+    app: collection
+
+---
+# Meta API Service（ClusterIP，仅集群内访问）
+apiVersion: v1
+kind: Service
+metadata:
+  name: meta-api
+  namespace: lakehouse-track
+  labels:
+    app: meta-api
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+  selector:
+    app: meta-api
+
+---
+# PostgreSQL Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: lakehouse-track
+  labels:
+    app: postgres
+spec:
+  type: ClusterIP
+  ports:
+    - name: pg
+      port: 5432
+      targetPort: 5432
+  selector:
+    app: postgres
+
+---
+# MinIO Service（S3 API）
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: lakehouse-track
+  labels:
+    app: minio
+spec:
+  type: ClusterIP
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+    - name: console
+      port: 9001
+      targetPort: 9001
+  selector:
+    app: minio
+
+---
+# MinIO Headless Service（StatefulSet DNS 解析）
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio-headless
+  namespace: lakehouse-track
+  labels:
+    app: minio
+spec:
+  clusterIP: None
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+  selector:
+    app: minio
+
+---
+# StarRocks FE Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: starrocks-fe
+  namespace: lakehouse-track
+  labels:
+    app: starrocks-fe
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8030
+      targetPort: 8030
+    - name: rpc
+      port: 9020
+      targetPort: 9020
+    - name: mysql
+      port: 9030
+      targetPort: 9030
+  selector:
+    app: starrocks-fe
+
+---
+# StarRocks CN Headless Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: starrocks-cn
+  namespace: lakehouse-track
+  labels:
+    app: starrocks-cn
+spec:
+  clusterIP: None
+  ports:
+    - name: http
+      port: 8040
+      targetPort: 8040
+    - name: heartbeat
+      port: 9050
+      targetPort: 9050
+  selector:
+    app: starrocks-cn

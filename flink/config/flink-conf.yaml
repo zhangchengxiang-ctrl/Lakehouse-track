@@ -28,6 +28,6 @@ fs.s3a.change.detection.mode: none
 execution.checkpointing.interval: 30s
 execution.checkpointing.mode: EXACTLY_ONCE
 state.backend: hashmap
-state.checkpoints.dir: s3://paimon-lake/flink/checkpoints
+state.checkpoints.dir: s3://lakehouse/flink/checkpoints
 
 classloader.resolve-order: parent-first

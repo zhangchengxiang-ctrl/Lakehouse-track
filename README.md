@@ -97,7 +97,7 @@ graph TD
 ### 3.1 首次启动步骤
 1. **安装依赖**：`bash scripts/lakehouse.sh install`（含 Hive Metastore 客户端依赖）
 2. **启动容器**：`docker compose up -d --build`
-3. **初始化存储**：访问 [MinIO](http://localhost:9001) (minioadmin/minioadmin) 创建 bucket `paimon-lake`。
+3. **初始化存储**：访问 [MinIO](http://localhost:9001) (minioadmin/minioadmin) 创建 bucket `Lakehouse`。
 4. **提交任务**：`./scripts/lakehouse.sh run-sql`（如在宿主机直连 HMS：`HMS_URI=thrift://127.0.0.1:9083 ./scripts/lakehouse.sh run-sql`）
 
 ### 3.2 验证埋点链路 (Tracking)
@@ -148,7 +148,7 @@ SELECT * FROM paimon_catalog.`default`.ods_events_core;
 | **Flink 资源不足** | 报错 `NoResourceAvailableException`。项目已调优内存，请确保 Docker 内存限制 ≥ 8GB。 |
 | **StarRocks Catalog 已存在** | 脚本已修复 DROP 顺序。若仍报错，可执行 `./scripts/lakehouse.sh run-sql starrocks` 强制重刷。 |
 | **Paimon 查询报错 (InvalidClassException)** | 典型原因是 **Flink/Paimon/StarRocks** 三端 JAR 版本不一致导致的类冲突。当前推荐版本线为：Flink **1.20.3** + Paimon **1.3.1** + StarRocks **3.5.12**（并确保 StarRocks 外部 Catalog 所需 JAR 由 `scripts/lakehouse.sh install` 下载）。 |
-| **Vector 无法写入 MinIO** | 检查 `paimon-lake` bucket 是否已创建。创建后需 `docker compose restart vector`。 |
+| **Vector 无法写入 MinIO** | 检查 `Lakehouse` bucket 是否已创建。创建后需 `docker compose restart vector`。 |
 | **Flink 任务 RESTARTING** | 通常是 S3 连接超时或 JAR 缺失。执行 `./scripts/lakehouse.sh fix` 自动重置任务。 |
 | **完全重置环境** | 执行 `./scripts/lakehouse.sh reset`。**注意：这将删除所有历史数据！** |
 

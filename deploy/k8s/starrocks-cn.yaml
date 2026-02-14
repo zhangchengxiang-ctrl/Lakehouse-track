@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: starrocks-cn
+  namespace: lakehouse-track
+  labels:
+    app: starrocks-cn
+spec:
+  serviceName: starrocks-cn
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: starrocks-cn
+  template:
+    metadata:
+      labels:
+        app: starrocks-cn
+    spec:
+      initContainers:
+        # 等待 FE 就绪后注册 CN 节点
+        - name: register-cn
+          image: mysql:8.0
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              until mysql -h starrocks-fe -P9030 -uroot -e "SELECT 1" 2>/dev/null; do
+                echo "Waiting for StarRocks FE..."
+                sleep 5
+              done
+              HOSTNAME=$(hostname)
+              mysql -h starrocks-fe -P9030 -uroot -e "SHOW COMPUTE NODES" | grep -q "$HOSTNAME" || \
+              mysql -h starrocks-fe -P9030 -uroot -e "ALTER SYSTEM ADD COMPUTE NODE \"$HOSTNAME.starrocks-cn.lakehouse-track.svc.cluster.local:9050\";"
+              echo "CN node $HOSTNAME registered"
+      containers:
+        - name: cn
+          image: starrocks/cn-ubuntu:3.5.12
+          ports:
+            - containerPort: 8040
+              name: http
+            - containerPort: 9050
+              name: heartbeat
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+            limits:
+              cpu: "4"
+              memory: 16Gi
+          env:
+            - name: HOST_TYPE
+              value: FQDN
+            - name: JAVA_TOOL_OPTIONS
+              value: "--add-opens=java.base/java.util=ALL-UNNAMED"
+          volumeMounts:
+            - name: cn-storage
+              mountPath: /opt/starrocks/cn/storage
+            - name: cn-datacache
+              mountPath: /opt/starrocks/cn/datacache
+          livenessProbe:
+            tcpSocket:
+              port: 9050
+            initialDelaySeconds: 60
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8040
+            initialDelaySeconds: 30
+            periodSeconds: 10
+  volumeClaimTemplates:
+    - metadata:
+        name: cn-storage
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 100Gi
+    - metadata:
+        name: cn-datacache
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 200Gi

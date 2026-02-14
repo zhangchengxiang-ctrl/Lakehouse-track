@@ -1,0 +1,249 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: collection
+  namespace: lakehouse-track
+  labels:
+    app: collection
+spec:
+  replicas: 6
+  selector:
+    matchLabels:
+      app: collection
+  template:
+    metadata:
+      labels:
+        app: collection
+    spec:
+      initContainers:
+        # 初始化 GeoIP 数据库
+        - name: init-geoip
+          image: alpine:3.20
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              apk add --no-cache curl
+              mkdir -p /geoip
+              echo "Downloading GeoLite2-City.mmdb..."
+              # 方式 A：从内部 HTTP 服务器或 S3 下载（推荐生产使用）
+              # curl -sSL -o /geoip/GeoLite2-City.mmdb "http://your-internal-host/geoip/GeoLite2-City.mmdb"
+              # 方式 B：从 MaxMind 下载（需要 LICENSE_KEY 环境变量）
+              if [ -n "$MAXMIND_LICENSE_KEY" ]; then
+                curl -sSL -o /tmp/geolite2.tar.gz \
+                  "https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-City&license_key=${MAXMIND_LICENSE_KEY}&suffix=tar.gz"
+                tar xzf /tmp/geolite2.tar.gz -C /tmp
+                find /tmp -name 'GeoLite2-City.mmdb' -exec cp {} /geoip/ \;
+                rm -rf /tmp/geolite2.tar.gz /tmp/GeoLite2-City_*
+              fi
+              # 方式 C：如果上面都没有，创建一个空占位文件（Vector 会跳过 GeoIP）
+              [ -f /geoip/GeoLite2-City.mmdb ] || touch /geoip/GeoLite2-City.mmdb
+              ls -la /geoip/
+          env:
+            - name: MAXMIND_LICENSE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lakehouse-secrets
+                  key: MAXMIND_LICENSE_KEY
+                  optional: true
+          volumeMounts:
+            - name: geoip-data
+              mountPath: /geoip
+        # 初始化 enrichment CSV 和首次元数据同步
+        - name: init-meta
+          image: postgres:16-alpine
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              mkdir -p /data/meta /var/lib/vector /var/log/nginx
+              for f in projects.csv valid_events.csv valid_properties.csv; do
+                if [ ! -f "/data/meta/$f" ]; then
+                  case "$f" in
+                    projects.csv)         echo "project_name,is_auto_create" > "/data/meta/$f" ;;
+                    valid_events.csv)     echo "project_name,event_name,accepted" > "/data/meta/$f" ;;
+                    valid_properties.csv) echo "project_name,property_name,data_type" > "/data/meta/$f" ;;
+                  esac
+                fi
+              done
+              # 等待 PG + 首次同步
+              until pg_isready -h $PG_HOST -p $PG_PORT -U $PG_USER -d $PG_DB; do sleep 2; done
+              /opt/scripts/meta_sync.sh --once || echo "Initial sync failed"
+          env:
+            - name: PG_HOST
+              value: "postgres"
+            - name: PG_PORT
+              value: "5432"
+            - name: PG_USER
+              valueFrom:
+                secretKeyRef:
+                  name: lakehouse-secrets
+                  key: PG_USER
+            - name: PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: lakehouse-secrets
+                  key: PG_PASSWORD
+            - name: PG_DB
+              valueFrom:
+                secretKeyRef:
+                  name: lakehouse-secrets
+                  key: PG_DB
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: lakehouse-secrets
+                  key: PG_PASSWORD
+          volumeMounts:
+            - name: shared-data
+              mountPath: /data/meta
+              subPath: meta
+            - name: shared-data
+              mountPath: /var/lib/vector
+              subPath: vector-data
+            - name: shared-logs
+              mountPath: /var/log/nginx
+            - name: meta-sync-script
+              mountPath: /opt/scripts
+      containers:
+        # ---- Nginx ----
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 80
+              name: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: shared-logs
+              mountPath: /var/log/nginx
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 3
+            periodSeconds: 5
+
+        # ---- Vector ----
+        - name: vector
+          image: timberio/vector:0.53.0-alpine
+          args: ["--config", "/etc/vector/vector.yaml"]
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+          env:
+            - name: S3_ENDPOINT
+              value: "http://minio:9000"
+            - name: S3_BUCKET
+              value: "lakehouse"
+            - name: S3_REGION
+              value: "us-east-1"
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lakehouse-secrets
+                  key: S3_ACCESS_KEY
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lakehouse-secrets
+                  key: S3_SECRET_KEY
+            - name: META_API_URL
+              value: "http://meta-api:3000/register"
+          volumeMounts:
+            - name: vector-config
+              mountPath: /etc/vector/vector.yaml
+              subPath: vector.yaml
+            - name: shared-logs
+              mountPath: /var/log/nginx
+              readOnly: true
+            - name: shared-data
+              mountPath: /data/meta
+              subPath: meta
+              readOnly: true
+            - name: shared-data
+              mountPath: /var/lib/vector
+              subPath: vector-data
+            - name: geoip-data
+              mountPath: /etc/vector/geoip
+
+        # ---- MetaSync sidecar ----
+        - name: meta-sync
+          image: postgres:16-alpine
+          command: ["/opt/scripts/meta_sync.sh"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          env:
+            - name: PG_HOST
+              value: "postgres"
+            - name: PG_PORT
+              value: "5432"
+            - name: META_SYNC_INTERVAL
+              value: "30"
+            - name: PG_USER
+              valueFrom:
+                secretKeyRef:
+                  name: lakehouse-secrets
+                  key: PG_USER
+            - name: PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: lakehouse-secrets
+                  key: PG_PASSWORD
+            - name: PG_DB
+              valueFrom:
+                secretKeyRef:
+                  name: lakehouse-secrets
+                  key: PG_DB
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: lakehouse-secrets
+                  key: PG_PASSWORD
+          volumeMounts:
+            - name: shared-data
+              mountPath: /data/meta
+              subPath: meta
+            - name: meta-sync-script
+              mountPath: /opt/scripts
+
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+        - name: vector-config
+          configMap:
+            name: vector-scale-config
+        - name: shared-logs
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: shared-data
+          emptyDir:
+            sizeLimit: 15Gi
+        - name: geoip-data
+          emptyDir: {}
+        - name: meta-sync-script
+          configMap:
+            name: meta-sync-script
+            defaultMode: 0755

@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: supervisor-config
+  namespace: lakehouse-track
+data:
+  supervisord.conf: |
+    [supervisord]
+    nodaemon=true
+    logfile=/dev/stdout
+    logfile_maxbytes=0
+    loglevel=info
+
+    [program:nginx]
+    command=/usr/sbin/nginx -g "daemon off;"
+    stdout_logfile=/dev/stdout
+    stdout_logfile_maxbytes=0
+    stderr_logfile=/dev/stderr
+    stderr_logfile_maxbytes=0
+    autorestart=true
+    priority=10
+
+    [program:vector]
+    command=/usr/local/bin/vector --config /etc/vector/vector.yaml
+    stdout_logfile=/dev/stdout
+    stdout_logfile_maxbytes=0
+    stderr_logfile=/dev/stderr
+    stderr_logfile_maxbytes=0
+    autorestart=true
+    priority=20
+    startsecs=3
+
+    [program:meta-sync]
+    command=/opt/scripts/meta_sync.sh
+    stdout_logfile=/dev/stdout
+    stdout_logfile_maxbytes=0
+    stderr_logfile=/dev/stderr
+    stderr_logfile_maxbytes=0
+    autorestart=true
+    priority=25
+
+    [program:logrotate]
+    command=/bin/sh -c "while true; do logrotate -f /etc/logrotate.d/nginx-tracking 2>/dev/null; sleep 300; done"
+    stdout_logfile=/dev/stdout
+    stdout_logfile_maxbytes=0
+    autorestart=true
+    priority=30

@@ -19,7 +19,7 @@
   </property>
   <property>
     <name>hive.metastore.warehouse.dir</name>
-    <value>s3a://paimon-lake/paimon_data/</value>
+    <value>s3a://lakehouse/paimon_data/</value>
   </property>
   <property>
     <name>fs.s3a.endpoint</name>

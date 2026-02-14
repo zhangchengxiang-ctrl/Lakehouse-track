@@ -1,24 +1,23 @@
-# Lakehouse-track：埋点全链路（Paimon Hive Metastore）
-# 使用方式：docker compose up -d --build
-# 最小资源模式：各服务已配置内存限制，合计约 8GB
+# ============================================================
+# Lakehouse-track：埋点全链路 + CDC（统一架构）
+# 用法：docker compose up -d --build --scale collection=2
 #
-# 镜像说明：postgres:16 redis:7 minio/minio flink:1.20.3-scala_2.12
-#          starrocks/fe-ubuntu:3.5.12 starrocks/cn-ubuntu:3.5.12（存算分离，JDK17+）
-#          apache/streampark:2.1.6 apache/kafka:3.7.0
-#          nginx:latest timberio/vector:0.53.0-alpine（采集端拆分为两镜像，共享 nginx_logs）
-# 简化：StreamPark 元数据复用 PostgreSQL，已移除 MySQL
+# 双链路架构：
+#   埋点采集：SDK → HAProxy LB → [Nginx+Vector+MetaSync] x N → S3 (TSV.gz) → StarRocks Pipe
+#   CDC 入湖：PostgreSQL → Flink CDC → Paimon → StarRocks Paimon Catalog
 #
 # 前置准备：
 #   1. bash scripts/lakehouse.sh install
-# MinIO 的 bucket 与 staging 前缀会由 minio-init 自动创建
-#
-# StreamPark 启动：docker compose --profile streampark up -d streampark（需先拷出 Flink 到 flink/dist/flink）
-#
+#   2. docker compose up -d --build --scale collection=2
+#   3. StarRocks 就绪后：mysql -h 127.0.0.1 -P 9030 -u root < starrocks/starrocks.sql
+#   4. Flink CDC：./scripts/lakehouse.sh run-sql flink
+# ============================================================
+
 services:
-  # ========== 埋点链路 (Lakehouse-track) ==========
+  # ==================== 基础设施 ====================
   postgres:
     image: postgres:16
-    command: ["postgres", "-c", "wal_level=logical"]  # PG CDC 必需，首次部署生效
+    command: ["postgres", "-c", "wal_level=logical"]   # CDC 必需
     mem_limit: 512m
     ports:
       - "5432:5432"
@@ -33,18 +32,6 @@ services:
       test: ["CMD-SHELL", "pg_isready -U paimon -d paimon_db"]
       interval: 5s
       timeout: 5s
-      retries: 5
-    networks:
-      - lakehouse-net
-
-  redis:
-    image: redis:7
-    mem_limit: 256m
-    ports: 
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
       retries: 5
     networks:
       - lakehouse-net
@@ -71,48 +58,93 @@ services:
         condition: service_started
     entrypoint: >
       /bin/sh -c "
-      for i in $(seq 1 30); do
+      for i in $$(seq 1 30); do
         /usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin && break;
         sleep 2;
       done;
-      /usr/bin/mc mb myminio/paimon-lake || true;
-      printf \"\" | /usr/bin/mc pipe myminio/paimon-lake/staging/.keep || true;
-      printf \"\" | /usr/bin/mc pipe myminio/paimon-lake/paimon_data/.keep || true;
+      /usr/bin/mc mb myminio/lakehouse || true;
+      printf '' | /usr/bin/mc pipe myminio/lakehouse/track/events/.keep || true;
+      printf '' | /usr/bin/mc pipe myminio/lakehouse/track/id_mapping/.keep || true;
+      printf '' | /usr/bin/mc pipe myminio/lakehouse/paimon_data/.keep || true;
       exit 0;
       "
     networks:
       - lakehouse-net
 
+  # ==================== 埋点采集链路 ====================
+  # SDK → HAProxy → Collection (Nginx+Vector+MetaSync) → S3 → StarRocks
 
-  # 采集端：Nginx 写日志 -> 共享目录 -> Vector 读并写入 MinIO
-  nginx:
-    image: nginx:latest
+  # L4 负载均衡
+  lb:
+    image: haproxy:2.9-alpine
+    mem_limit: 128m
     ports:
       - "80:80"
+      - "8404:8404"          # HAProxy 统计页面
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/sdk_debug:/etc/nginx/sdk_debug:ro
-      - ./data/nginx_logs:/var/log/nginx
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - collection
+    restart: on-failure
     networks:
       - lakehouse-net
 
-  vector:
-    image: timberio/vector:0.53.0-alpine
-    command: ["--config", "/etc/vector/vector.yaml"]
-    mem_limit: 256m
+  # 采集节点 (Nginx + Vector + MetaSync)，无状态可水平扩展
+  collection:
+    build:
+      context: .
+      dockerfile: collection/Dockerfile
+    mem_limit: 1g
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_USER: paimon
+      PG_PASSWORD: paimon123
+      PG_DB: paimon_db
+      S3_ENDPOINT: "http://minio:9000"
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: lakehouse
+      S3_REGION: us-east-1
+      META_API_URL: "http://meta-api:3000/register"
+      META_SYNC_INTERVAL: "30"
     volumes:
-      - ./data/nginx_logs:/var/log/nginx:ro
-      - ./vector/vector.yaml:/etc/vector/vector.yaml:ro
-      - ./vector/geoip:/etc/vector/geoip:ro
+      - ./collection/config/geoip:/etc/vector/geoip:ro
+      - ./collection/config/sdk_debug:/etc/nginx/sdk_debug:ro
     depends_on:
+      postgres:
+        condition: service_healthy
       minio:
         condition: service_started
     restart: on-failure
     networks:
       - lakehouse-net
 
-  # ========== Flink ==========
-  # 使用自定义镜像（flink/Dockerfile）避免 bind mount 覆盖 lib 导致丢失 flink-dist
+  # 元数据注册 API
+  meta-api:
+    build:
+      context: .
+      dockerfile: meta-api/Dockerfile
+    mem_limit: 256m
+    ports:
+      - "3000:3000"
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_USER: paimon
+      PG_PASSWORD: paimon123
+      PG_DB: paimon_db
+      PG_POOL_MAX: "20"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - lakehouse-net
+
+  # ==================== CDC 链路 (Flink + Paimon) ====================
+  # PostgreSQL CDC → Flink → Paimon → StarRocks Paimon Catalog
+
   flink-jobmanager:
     build:
       context: .
@@ -158,7 +190,6 @@ services:
     networks:
       - lakehouse-net
 
-  # ========== Hive Metastore (Standalone) ==========
   hive-metastore:
     image: apache/hive:3.1.3
     container_name: hive-metastore
@@ -170,7 +201,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      - HIVE_CONF_hive_metastore_warehouse_dir=s3a://paimon-lake/paimon_data/
+      - HIVE_CONF_hive_metastore_warehouse_dir=s3a://lakehouse/paimon_data/
       - HIVE_CONF_hive_metastore_disallow_incompatible_col_type_changes=false
       - AWS_ACCESS_KEY_ID=minioadmin
       - AWS_SECRET_ACCESS_KEY=minioadmin
@@ -185,56 +216,15 @@ services:
       - "9083:9083"
     volumes:
       - ./flink/lib/postgresql-42.7.3.jar:/opt/hive/lib/postgresql-42.7.3.jar
-      - ./hive/hms-lib/hadoop-aws-3.1.0.jar:/opt/hive/lib/hadoop-aws-3.1.0.jar
-      - ./hive/hms-lib/aws-java-sdk-bundle-1.11.271.jar:/opt/hive/lib/aws-java-sdk-bundle-1.11.271.jar
+      - ./hive/lib/hadoop-aws-3.1.0.jar:/opt/hive/lib/hadoop-aws-3.1.0.jar
+      - ./hive/lib/aws-java-sdk-bundle-1.11.271.jar:/opt/hive/lib/aws-java-sdk-bundle-1.11.271.jar
       - ./hive/hive-site.xml:/opt/hive/conf/hive-site.xml:ro
       - ./hive/hms-entrypoint.sh:/opt/hive/bin/hms-entrypoint.sh:ro
     networks:
       - lakehouse-net
 
-  # streampark:
-  #   image: apache/streampark:2.1.6
-  #   container_name: streampark
-  #   profiles:
-  #     - streampark
-  #   ports:
-  #     - "10000:10000"
-  #   volumes:
-  #     - ./flink/lib:/opt/streampark/lib
-  #     - ./flink/dist/flink:/opt/flink
-  #   environment:
-  #     - DATASOURCE_DIALECT=pgsql
-  #     - DATASOURCE_URL=jdbc:postgresql://postgres:5432/streampark?stringtype=unspecified
-  #     - DATASOURCE_USERNAME=paimon
-  #     - DATASOURCE_PASSWORD=paimon123
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #   networks:
-  #     - lakehouse-net
+  # ==================== 分析层 (StarRocks 存算分离) ====================
 
-  # ========== 消息队列与分析层（可选，当前埋点链路未使用） ==========
-  # kafka:
-  #   image: apache/kafka:3.7.0
-  #   profiles:
-  #     - kafka
-  #   container_name: kafka
-  #   environment:
-  #     KAFKA_NODE_ID: 1
-  #     KAFKA_PROCESS_ROLES: broker,controller
-  #     KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
-  #     KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
-  #     KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
-  #     KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-  #     KAFKA_LOG_DIRS: "/var/lib/kafka/data"
-  #   volumes:
-  #     - ./data/kafka:/var/lib/kafka/data
-  #   ports:
-  #     - "9092:9092"
-  #   networks:
-  #     - lakehouse-net
-
-  # ========== StarRocks 存算分离（FE + CN，数据存 MinIO） ==========
   starrocks-fe:
     image: starrocks/fe-ubuntu:3.5.12
     container_name: starrocks-fe
@@ -247,11 +237,10 @@ services:
       - /bin/bash
       - -c
       - |
-        # 1) 依赖注入：使用专用子目录隔离
         mkdir -p /opt/starrocks/fe/lib/paimon-ext
-        ln -sf /opt/starrocks-extra-jars/*.jar /opt/starrocks/fe/lib/paimon-ext/
-        
-        # 2) 合并共享配置
+        if [ -d /opt/starrocks-extra-jars ] && ls /opt/starrocks-extra-jars/*.jar 1>/dev/null 2>&1; then
+          ln -sf /opt/starrocks-extra-jars/*.jar /opt/starrocks/fe/lib/paimon-ext/
+        fi
         if ! grep -q "BEGIN LAKEHOUSE_TRACK_SHARED_CONF" /opt/starrocks/fe/conf/fe.conf 2>/dev/null; then
           {
             echo ""
@@ -293,19 +282,27 @@ services:
       - /bin/bash
       - -c
       - |
-        # 1) 依赖注入
-        mkdir -p /opt/starrocks/cn/lib/paimon-ext
-        ln -sf /opt/starrocks-extra-jars/*.jar /opt/starrocks/cn/lib/paimon-ext/
-        
-        # 2) 幂等添加 CN 节点
+        # 注入 CN 缓存配置（追加到 cn.conf 末尾）
+        if [ -f /opt/starrocks-cn-shared.conf ] && ! grep -q "LAKEHOUSE_TRACK_CN_CONF" /opt/starrocks/cn/conf/cn.conf 2>/dev/null; then
+          {
+            echo ""
+            echo "# BEGIN LAKEHOUSE_TRACK_CN_CONF"
+            cat /opt/starrocks-cn-shared.conf
+            echo "# END LAKEHOUSE_TRACK_CN_CONF"
+          } >> /opt/starrocks/cn/conf/cn.conf
+        fi
+        mkdir -p /opt/starrocks/cn/lib/paimon-ext /opt/starrocks/cn/datacache
+        if [ -d /opt/starrocks-extra-jars ] && ls /opt/starrocks-extra-jars/*.jar 1>/dev/null 2>&1; then
+          ln -sf /opt/starrocks-extra-jars/*.jar /opt/starrocks/cn/lib/paimon-ext/
+        fi
         sleep 15
         mysql -h starrocks-fe -P9030 -uroot -e "SHOW COMPUTE NODES" | grep -q "starrocks-cn" || \
-        mysql -h starrocks-fe -P9030 -uroot -e "ALTER SYSTEM ADD COMPUTE NODE \"starrocks-cn:9050\";"
-        
+        mysql -h starrocks-fe -P9030 -uroot -e "ALTER SYSTEM ADD COMPUTE NODE 'starrocks-cn:9050';"
         /opt/starrocks/cn/bin/start_cn.sh
     ports:
       - "8040:8040"
     volumes:
+      - ./starrocks/config/cn.conf:/opt/starrocks-cn-shared.conf:ro
       - ./starrocks/jars:/opt/starrocks-extra-jars:ro
       - ./data/starrocks/cn/storage:/opt/starrocks/cn/storage
       - ./data/starrocks/cn/datacache:/opt/starrocks/cn/datacache
@@ -328,13 +325,3 @@ networks:
   lakehouse-net:
     name: lakehouse-net
     driver: bridge
-
-volumes:
-  # 使用本地文件夹挂载，不再需要命名的 volume
-  {}
-  # postgres_data:
-  # minio_data:
-  # kafka_data:
-  # nginx_logs:
-  # starrocks_fe_data:
-  # starrocks_cn_data:

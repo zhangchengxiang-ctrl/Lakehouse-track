@@ -4,17 +4,16 @@
 #
 # 子命令：
 #   install        安装所有依赖（Flink JAR、GeoIP、StarRocks JAR、配置校验）
-#   fix            修复 Flink 入湖（取消任务、重启、重新执行 flink.sql）
-#   verify         验证埋点数据链路
+#   fix            修复 Flink CDC（取消任务、重启、重新执行 flink.sql）
+#   verify         验证埋点采集链路（Nginx→Vector→S3→StarRocks Pipe）
 #   replay         重放 test_data 中的神策日志
-#   sync-metadata  转换并导入埋点元数据（MySQL -> PG）
 #   reset          清除数据并重建（含 flink.sql、starrocks.sql）
 #   run-sql [flink|starrocks|文件] 执行 SQL（无参数时执行 flink.sql + starrocks.sql）
 #   download-starrocks-jars  仅下载 StarRocks 外部目录依赖
 #
 # 示例：
 #   ./scripts/lakehouse.sh install
-#   ./scripts/lakehouse.sh fix
+#   ./scripts/lakehouse.sh replay
 #   ./scripts/lakehouse.sh run-sql
 
 set -e
@@ -73,19 +72,19 @@ run_starrocks_sql() {
   [ -z "$f" ] && f="starrocks/starrocks.sql"
   echo ">>> $f (StarRocks)"
   
-  # 优化：幂等清理。StarRocks 3.x 某些对象不支持 IF EXISTS，通过 || true 忽略不存在的错误
-  _run_mysql -e "DROP MATERIALIZED VIEW IF EXISTS ods.dws_daily_active_users" 2>/dev/null || true
-  _run_mysql -e "DROP MATERIALIZED VIEW IF EXISTS ods.dwd_user_full_track" 2>/dev/null || true
-  _run_mysql -e "DROP RESOURCE GROUP mv_refresh_group" 2>/dev/null || true
+  # 幂等清理：删除旧对象（如存在），然后重新执行 SQL
+  _run_mysql -e "DROP MATERIALIZED VIEW IF EXISTS ods.dws_daily_event_stats" 2>/dev/null || true
+  _run_mysql -e "DROP PIPE IF EXISTS ods.pipe_s3_events" 2>/dev/null || true
+  _run_mysql -e "DROP PIPE IF EXISTS ods.pipe_s3_id_mapping" 2>/dev/null || true
   _run_mysql -e "DROP DATABASE IF EXISTS ods" 2>/dev/null || true
-  _run_mysql -e "DROP CATALOG paimon_catalog" 2>/dev/null || true
-  
-  echo "  创建 Paimon Catalog..."
+
+  echo "  创建 Paimon Catalog（供 CDC 链路使用）..."
+  _run_mysql -e "DROP CATALOG IF EXISTS paimon_catalog" 2>/dev/null || true
   _run_mysql -e "CREATE EXTERNAL CATALOG paimon_catalog PROPERTIES (\
     \"type\" = \"paimon\",\
     \"paimon.catalog.type\" = \"hive\",\
     \"hive.metastore.uris\" = \"thrift://hive-metastore:9083\",\
-    \"paimon.catalog.warehouse\" = \"s3a://paimon-lake/paimon_data\",\
+    \"paimon.catalog.warehouse\" = \"s3a://lakehouse/paimon_data\",\
     \"aws.s3.endpoint\" = \"http://minio:9000\",\
     \"aws.s3.access_key\" = \"minioadmin\",\
     \"aws.s3.secret_key\" = \"minioadmin\",\
@@ -93,24 +92,7 @@ run_starrocks_sql() {
     \"aws.s3.enable_path_style_access\" = \"true\"\
   )" 2>/dev/null || true
 
-  echo "  等待 Paimon 元数据就绪..."
-  for i in $(seq 1 20); do
-    dbs=$(_run_mysql -N -e "SHOW DATABASES FROM paimon_catalog" 2>/dev/null || true)
-    if python - <<'PY' "$dbs"
-import sys
-dbs = sys.argv[1].split()
-sys.exit(0 if "ods" in dbs else 1)
-PY
-    then
-      echo "  ✓ 发现 Paimon 数据库 ods"
-      break
-    fi
-    echo "  等待 ods... ($i/20)"
-    sleep 3
-  done
-
-  echo "  等待元数据清理..."
-  sleep 2
+  echo "  执行 starrocks.sql..."
   _run_mysql < "$f"
 }
 
@@ -129,7 +111,7 @@ cmd_install() {
 
   echo ""
   echo "[2/4] GeoIP 数据库..."
-  GEOIP_DIR="$PROJECT_DIR/vector/geoip"
+  GEOIP_DIR="$PROJECT_DIR/collection/config/geoip"
   GEOIP_FILE="$GEOIP_DIR/GeoLite2-City.mmdb"
   mkdir -p "$GEOIP_DIR"
 
@@ -148,8 +130,7 @@ cmd_install() {
       if curl -sSfL --connect-timeout 30 -o "$GEOIP_FILE" "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb" 2>/dev/null; then
         echo "  ✓ GeoLite2-City.mmdb 下载完成"
       else
-        echo "  ⚠ GeoIP 下载失败，请手动下载到 vector/geoip/GeoLite2-City.mmdb"
-        echo "    参见 vector/geoip/README.md"
+        echo "  ⚠ GeoIP 下载失败，请手动下载到 collection/config/geoip/GeoLite2-City.mmdb"
       fi
     fi
   fi
@@ -249,70 +230,60 @@ done
 
   echo ""
   echo "=== 完成 ==="
-  echo "  约 30–60 秒后可在 StarRocks 查询："
-  echo "  SELECT * FROM paimon_catalog.\`default\`.ods_events_core;"
-  echo "  或再次运行 curl 发送测试数据后等待"
+  echo "  CDC 数据可在 StarRocks 查询："
+  echo "  SELECT * FROM paimon_catalog.ods.ods_orders_cdc;"
 }
 
 cmd_verify() {
   cd "$PROJECT_DIR"
 
-  echo "=== 0. 发送测试埋点 (重放历史日志) ==="
+  echo "=== 0. 发送测试埋点（重放历史日志）==="
   if [ -f "$SCRIPT_DIR/replay_logs.py" ]; then
     python3 "$SCRIPT_DIR/replay_logs.py"
   else
-    # 备用方案：发送单条测试埋点
     TEST_URL="http://localhost/sa?data=eyJkaXN0aW5jdF9pZCI6Ijg4OCIsImV2ZW50IjoiVmlld1Byb2R1Y3QiLCJ0eXBlIjoidHJhY2siLCJwcm9wZXJ0Ijp7InByaWNlIjoxMDB9LCJ0aW1lIjoxNzA3MTgwMDAwMDAwfQ=="
     curl -sSf --connect-timeout 5 -o /dev/null "$TEST_URL" 2>/dev/null || echo "  ✗ 请求失败"
   fi
-  
-  echo "  等待 45 秒让数据流经 Nginx→Vector→MinIO→Flink→Paimon..."
-  sleep 45
+
+  echo "  等待 30 秒让数据流经 Nginx→Vector→S3..."
+  sleep 30
   echo ""
 
   echo "=== 1. Nginx 日志（最近 3 条 sa 请求）==="
-  grep -o '"sa_data":"[^"]*"' data/nginx_logs/access.log 2>/dev/null | tail -3 || echo "无"
+  grep "/sa" data/nginx_logs/access.log 2>/dev/null | tail -3 || echo "  无"
 
   echo ""
-  echo "=== 2. MinIO staging 文件（Vector 输出）==="
-  find data/minio/paimon-lake/staging \( -name "*.log" -o -name "*.json" \) 2>/dev/null | head -10 || \
-    find data/minio/paimon-lake/staging -type f 2>/dev/null | head -10
-  echo "（若为空则 Vector 未写入或路径不同）"
+  echo "=== 2. MinIO S3 文件（Vector TSV.gz 输出）==="
+  echo "  events:"
+  find data/minio/lakehouse/track/events -name "*.tsv.gz" 2>/dev/null | head -5 || echo "    无"
+  echo "  id_mapping:"
+  find data/minio/lakehouse/track/id_mapping -name "*.tsv.gz" 2>/dev/null | head -5 || echo "    无"
 
   echo ""
-  echo "=== 3. Paimon ods_events_core 数据目录 ==="
-  ls -la data/minio/paimon-lake/data/default.db/ods_events_core/ 2>/dev/null || echo "无"
-  find data/minio/paimon-lake/data/default.db/ods_events_core -type d -name "bucket-*" 2>/dev/null | head -5 || echo "无 bucket 目录 = 无数据"
+  echo "=== 3. StarRocks Pipe 状态 ==="
+  _run_mysql -e "SHOW PIPES FROM ods" 2>/dev/null || echo "  StarRocks 未就绪"
 
   echo ""
-  echo "=== 4. Flink 任务状态 ==="
+  echo "=== 4. StarRocks 数据行数 ==="
+  _run_mysql -e "SELECT 'ods_events' AS tbl, COUNT(*) AS cnt FROM ods.ods_events UNION ALL SELECT 'ods_id_mapping', COUNT(*) FROM ods.ods_id_mapping" 2>/dev/null || echo "  查询失败"
+
+  echo ""
+  echo "=== 5. Flink CDC 任务状态 ==="
   curl -s "http://localhost:8081/v1/jobs" 2>/dev/null | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 for j in d.get('jobs',[]):
     print(f\"  {j['id'][:8]}... {j['status']}\")
-" 2>/dev/null || echo "Flink 未启动或不可达"
+" 2>/dev/null || echo "  Flink 未启动或不可达"
 
   echo ""
-  echo "=== 5. 建议操作 ==="
-  echo "  - 若 MinIO 无 staging 文件：检查 Vector 日志 docker compose logs vector"
-  echo "  - 若 Paimon 无 bucket：Flink 任务可能失败，检查 docker compose logs flink-taskmanager"
-  echo "  - 若 Flink 任务 RESTARTING：重新提交 flink.sql 或查看 Web UI http://localhost:8081"
-  echo "  - 发送测试埋点：$0 verify"
+  echo "=== 6. 建议操作 ==="
+  echo "  - 若 S3 无 TSV.gz 文件：docker compose logs collection-1 | tail -50"
+  echo "  - 若 Pipe 无数据：检查 SHOW PIPES FROM ods 的 LOAD_STATUS"
+  echo "  - 若 Flink 任务异常：docker compose logs flink-taskmanager | tail -50"
+  echo "  - 重放测试日志：$0 replay"
 }
 
-cmd_sync_metadata() {
-  echo "=== 1. 生成 PG 元数据脚本 ==="
-  python3 "$PROJECT_DIR/scripts/convert_user_track_mysql_to_pg.py"
-
-  echo ""
-  echo "=== 2. 导入到 PostgreSQL ==="
-  if docker compose ps postgres 2>/dev/null | grep -q "Up"; then
-    docker compose exec -T postgres psql -U paimon -d paimon_db -f /docker-entrypoint-initdb.d/04-init-user-track.sql
-  else
-    echo "PostgreSQL 容器未运行，跳过导入"
-  fi
-}
 
 cmd_reset() {
   echo "=========================================="
@@ -344,19 +315,13 @@ cmd_reset() {
     docker compose exec -T postgres pg_isready -U paimon 2>/dev/null && break
     sleep 5
   done
-  echo "  初始化 Postgres 元数据库（metastore/streampark）..."
+  echo "  初始化 Postgres 元数据库（metastore）..."
   if ! docker compose exec -T postgres psql -U paimon -d postgres -tAc \
     "SELECT 1 FROM pg_database WHERE datname = 'metastore'" 2>/dev/null | grep -q 1; then
     docker compose exec -T postgres psql -U paimon -d postgres -c "CREATE DATABASE metastore" 2>/dev/null || true
   fi
   docker compose exec -T postgres psql -U paimon -d postgres -c \
     "GRANT ALL PRIVILEGES ON DATABASE metastore TO paimon" 2>/dev/null || true
-  if ! docker compose exec -T postgres psql -U paimon -d postgres -tAc \
-    "SELECT 1 FROM pg_database WHERE datname = 'streampark'" 2>/dev/null | grep -q 1; then
-    docker compose exec -T postgres psql -U paimon -d postgres -c "CREATE DATABASE streampark" 2>/dev/null || true
-  fi
-  docker compose exec -T postgres psql -U paimon -d postgres -c \
-    "GRANT ALL PRIVILEGES ON DATABASE streampark TO paimon" 2>/dev/null || true
   echo "  等待 MinIO..."
   sleep 10
   # 本项目使用 Hive Metastore，等待 9083 端口就绪，避免 hive CLI 偶发阻塞
@@ -442,11 +407,10 @@ usage() {
   echo "用法: $0 <子命令> [参数...]"
   echo ""
   echo "子命令:"
-  echo "  install                安装所有依赖"
-  echo "  fix                    修复 Flink 入湖"
-  echo "  verify                 验证埋点数据链路（发送测试埋点后检查）"
+  echo "  install                安装所有依赖（Flink JAR、GeoIP、StarRocks JAR）"
+  echo "  fix                    修复 Flink CDC（取消任务、重启、重新执行 flink.sql）"
+  echo "  verify                 验证埋点采集链路（Nginx→Vector→S3→StarRocks Pipe）"
   echo "  replay                 重放 test_data 中的神策日志"
-  echo "  sync-metadata          转换并导入埋点元数据（MySQL -> PG）"
   echo "  reset                  清除数据并重建（含 flink.sql、starrocks.sql）"
   echo "  run-sql [flink|starrocks]  执行 SQL（无参数时执行 flink.sql + starrocks.sql）"
   echo "  download-starrocks-jars  仅下载 StarRocks 外部目录依赖"
@@ -473,9 +437,6 @@ case "$CMD" in
   replay)
     echo ">>> 开始重放测试日志..."
     python3 "$SCRIPT_DIR/replay_logs.py"
-    ;;
-  sync-metadata)
-    cmd_sync_metadata
     ;;
   reset)
     cmd_reset
