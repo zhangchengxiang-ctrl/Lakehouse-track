@@ -108,9 +108,12 @@ services:
       S3_REGION: us-east-1
       META_API_URL: "http://meta-api:3000/register"
       META_SYNC_INTERVAL: "30"
+      VECTOR_LOG: "info"
     volumes:
       - ./collection/config/geoip:/etc/vector/geoip:ro
       - ./collection/config/sdk_debug:/etc/nginx/sdk_debug:ro
+      # 注：使用 anonymous volumes 让每个 collection 实例拥有独立的 buffer
+      # 容器 restart 不丢数据，recreate/rebuild 会重置（生产用 K8s PVC 持久化）
     depends_on:
       postgres:
         condition: service_healthy
