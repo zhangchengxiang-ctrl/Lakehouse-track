@@ -6,14 +6,14 @@ test_data/
 *.db-*
 
 # ========== 依赖包 (通过 scripts/lakehouse.sh install 下载) ==========
-flink/lib/*.jar
-starrocks/jars/*.jar
-vector/geoip/*.mmdb
-!vector/geoip/README.md
+services/flink/lib/*.jar
+services/starrocks/jars/*.jar
+services/collection/config/geoip/*.mmdb
+!services/collection/config/geoip/README.md
 
 # ========== 运行时生成与临时文件 ==========
-flink/dist/flink/
-flink/tmp/
+services/flink/dist/flink/
+services/flink/tmp/
 .flink-sql-history
 **/logs/
 *.log

@@ -45,7 +45,7 @@ _run_mysql() {
 
 run_flink_sql() {
   local f=$1
-  [ -z "$f" ] && f="flink/flink.sql"
+  [ -z "$f" ] && f="services/flink/flink.sql"
   echo ">>> $f (Flink)"
 
   # 终极修复：使用“交互模式 stdin”一次性执行整份脚本（单 Session）
@@ -69,7 +69,7 @@ run_flink_sql() {
 
 run_starrocks_sql() {
   local f=$1
-  [ -z "$f" ] && f="starrocks/starrocks.sql"
+  [ -z "$f" ] && f="services/starrocks/starrocks.sql"
   echo ">>> $f (StarRocks)"
   
   # 幂等清理：删除旧对象（如存在），然后重新执行 SQL
@@ -92,8 +92,21 @@ run_starrocks_sql() {
     \"aws.s3.enable_path_style_access\" = \"true\"\
   )" 2>/dev/null || true
 
-  echo "  执行 starrocks.sql..."
+  echo "  执行 starrocks.sql (DDL + Catalog + MV)..."
   _run_mysql < "$f"
+
+  echo "  创建 S3 PIPE（需要 S3 路径中有 .tsv.gz 文件）..."
+  local pipe_sql="$PROJECT_DIR/services/starrocks/starrocks-pipes.sql"
+  if [ -f "$pipe_sql" ]; then
+    _run_mysql < "$pipe_sql" 2>&1 && true
+    local pipe_ok=$?
+    if [ $pipe_ok -ne 0 ]; then
+      echo "  ⚠ PIPE 创建失败（S3 暂无数据文件），有数据后运行 'make run-sql ARGS=starrocks' 重试"
+    fi
+  fi
+
+  echo "  检查 PIPE 状态..."
+  _run_mysql -N -e "SELECT CONCAT('  ✔ ', PIPE_NAME, ' → ', STATE) FROM information_schema.pipes WHERE database_name='ods'" 2>/dev/null || true
 }
 
 # -----------------------------------------------------------------------------
@@ -107,11 +120,11 @@ cmd_install() {
 
   echo ""
   echo "[1/4] Flink 依赖 JAR..."
-  bash "$PROJECT_DIR/flink/scripts/download-jars.sh"
+  bash "$PROJECT_DIR/services/flink/scripts/download-jars.sh"
 
   echo ""
   echo "[2/4] GeoIP 数据库..."
-  GEOIP_DIR="$PROJECT_DIR/collection/config/geoip"
+  GEOIP_DIR="$PROJECT_DIR/services/collection/config/geoip"
   GEOIP_FILE="$GEOIP_DIR/GeoLite2-City.mmdb"
   mkdir -p "$GEOIP_DIR"
 
@@ -130,7 +143,7 @@ cmd_install() {
       if curl -sSfL --connect-timeout 30 -o "$GEOIP_FILE" "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb" 2>/dev/null; then
         echo "  ✓ GeoLite2-City.mmdb 下载完成"
       else
-        echo "  ⚠ GeoIP 下载失败，请手动下载到 collection/config/geoip/GeoLite2-City.mmdb"
+        echo "  ⚠ GeoIP 下载失败，请手动下载到 services/collection/config/geoip/GeoLite2-City.mmdb"
       fi
     fi
   fi
@@ -141,10 +154,10 @@ cmd_install() {
 
   echo ""
   echo "[4/4] 配置校验..."
-  if [ -f "$PROJECT_DIR/starrocks/config/fe-shared.conf" ]; then
-    echo "  ✓ starrocks/config/fe-shared.conf 存在"
+  if [ -f "$PROJECT_DIR/services/starrocks/config/fe-shared.conf" ]; then
+    echo "  ✓ services/starrocks/config/fe-shared.conf 存在"
   else
-    echo "  ✗ 缺少 starrocks/config/fe-shared.conf"
+    echo "  ✗ 缺少 services/starrocks/config/fe-shared.conf"
     exit 1
   fi
 
@@ -160,7 +173,7 @@ cmd_install() {
 }
 
 cmd_download_starrocks_jars() {
-  JAR_DIR="$PROJECT_DIR/starrocks/jars"
+  JAR_DIR="$PROJECT_DIR/services/starrocks/jars"
   ALIYUN="https://maven.aliyun.com/repository/central"
   MAVEN="https://repo1.maven.org/maven2"
 
@@ -192,7 +205,7 @@ cmd_download_starrocks_jars() {
 
 cmd_fix() {
   echo "=== 1. 下载 Flink 依赖（含 flink-s3-fs-hadoop）==="
-  bash "$PROJECT_DIR/flink/scripts/download-jars.sh"
+  bash "$PROJECT_DIR/services/flink/scripts/download-jars.sh"
 
   echo ""
   echo "=== 2. 取消所有 Flink 任务 ==="
@@ -312,16 +325,16 @@ cmd_reset() {
   sleep 30
   echo "  等待 PostgreSQL healthy..."
   for i in $(seq 1 30); do
-    docker compose exec -T postgres pg_isready -U paimon 2>/dev/null && break
+    docker compose exec -T postgres pg_isready -U postgres 2>/dev/null && break
     sleep 5
   done
   echo "  初始化 Postgres 元数据库（metastore）..."
-  if ! docker compose exec -T postgres psql -U paimon -d postgres -tAc \
+  if ! docker compose exec -T postgres psql -U postgres -d postgres -tAc \
     "SELECT 1 FROM pg_database WHERE datname = 'metastore'" 2>/dev/null | grep -q 1; then
-    docker compose exec -T postgres psql -U paimon -d postgres -c "CREATE DATABASE metastore" 2>/dev/null || true
+    docker compose exec -T postgres psql -U postgres -d postgres -c "CREATE DATABASE metastore" 2>/dev/null || true
   fi
-  docker compose exec -T postgres psql -U paimon -d postgres -c \
-    "GRANT ALL PRIVILEGES ON DATABASE metastore TO paimon" 2>/dev/null || true
+  docker compose exec -T postgres psql -U postgres -d postgres -c \
+    "GRANT ALL PRIVILEGES ON DATABASE metastore TO postgres" 2>/dev/null || true
   echo "  等待 MinIO..."
   sleep 10
   # 本项目使用 Hive Metastore，等待 9083 端口就绪，避免 hive CLI 偶发阻塞
@@ -372,16 +385,16 @@ cmd_run_sql() {
   cd "$PROJECT_DIR"
 
   if [ $# -eq 0 ]; then
-    run_flink_sql "flink/flink.sql"
-    run_starrocks_sql "starrocks/starrocks.sql"
+    run_flink_sql "services/flink/flink.sql"
+    run_starrocks_sql "services/starrocks/starrocks.sql"
   else
     for f in "$@"; do
       case "$f" in
-        flink|flink.sql|flink/flink.sql)
-          run_flink_sql "flink/flink.sql"
+        flink|flink.sql|flink/flink.sql|services/flink/flink.sql)
+          run_flink_sql "services/flink/flink.sql"
           ;;
-        starrocks|starrocks.sql|starrocks/starrocks.sql)
-          run_starrocks_sql "starrocks/starrocks.sql"
+        starrocks|starrocks.sql|starrocks/starrocks.sql|services/starrocks/starrocks.sql)
+          run_starrocks_sql "services/starrocks/starrocks.sql"
           ;;
         *)
           if [ -f "$f" ]; then

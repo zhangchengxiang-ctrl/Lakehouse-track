@@ -51,12 +51,12 @@ spec:
               mountPath: /var/lib/postgresql/data
           livenessProbe:
             exec:
-              command: ["pg_isready", "-U", "paimon", "-d", "paimon_db"]
+              command: ["pg_isready", "-U", "postgres", "-d", "postgres"]
             initialDelaySeconds: 15
             periodSeconds: 10
           readinessProbe:
             exec:
-              command: ["pg_isready", "-U", "paimon", "-d", "paimon_db"]
+              command: ["pg_isready", "-U", "postgres", "-d", "postgres"]
             initialDelaySeconds: 5
             periodSeconds: 5
   volumeClaimTemplates:

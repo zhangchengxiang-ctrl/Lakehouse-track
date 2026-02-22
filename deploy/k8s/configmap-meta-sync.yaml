@@ -13,9 +13,11 @@ data:
 
     PG_HOST="${PG_HOST:-postgres}"
     PG_PORT="${PG_PORT:-5432}"
-    PG_USER="${PG_USER:-paimon}"
-    PG_DB="${PG_DB:-paimon_db}"
-    export PGPASSWORD="${PG_PASSWORD:-paimon123}"
+    PG_USER="${PG_USER:-postgres}"
+    PG_DB="${PG_DB:-postgres}"
+    PG_SCHEMA="${PG_SCHEMA:-StellarTrace}"
+    export PGPASSWORD="${PG_PASSWORD:-postgres}"
+    export PGOPTIONS="-c search_path=${PG_SCHEMA}"
 
     PG_CONN="-h $PG_HOST -p $PG_PORT -U $PG_USER -d $PG_DB"
 
@@ -25,7 +27,7 @@ data:
         {
             echo "project_name,is_auto_create"
             psql $PG_CONN -t -A -F',' -c \
-                "SELECT name, is_auto_create FROM user_track.project WHERE status = 1" 2>/dev/null || true
+                "SELECT name, is_auto_create FROM track_project WHERE status = 1" 2>/dev/null || true
         } > "${META_DIR}/projects.csv.tmp"
         mv -f "${META_DIR}/projects.csv.tmp" "${META_DIR}/projects.csv"
 
@@ -33,8 +35,8 @@ data:
             echo "project_name,event_name,accepted"
             psql $PG_CONN -t -A -F',' -c \
                 "SELECT p.name, e.name, e.accepted
-                 FROM user_track.event_define e
-                 JOIN user_track.project p ON e.project_id = p.id
+                 FROM track_event_define e
+                 JOIN track_project p ON e.project_id = p.id
                  WHERE p.status = 1" 2>/dev/null || true
         } > "${META_DIR}/valid_events.csv.tmp"
         mv -f "${META_DIR}/valid_events.csv.tmp" "${META_DIR}/valid_events.csv"
@@ -43,8 +45,8 @@ data:
             echo "project_name,property_name,data_type"
             psql $PG_CONN -t -A -F',' -c \
                 "SELECT p.name, pd.name, pd.data_type
-                 FROM user_track.property_define pd
-                 JOIN user_track.project p ON pd.project_id = p.id
+                 FROM track_property_define pd
+                 JOIN track_project p ON pd.project_id = p.id
                  WHERE p.status = 1 AND pd.is_in_use = 1" 2>/dev/null || true
         } > "${META_DIR}/valid_properties.csv.tmp"
         mv -f "${META_DIR}/valid_properties.csv.tmp" "${META_DIR}/valid_properties.csv"
