@@ -210,9 +210,66 @@ SELECT
 FROM ods.ods_events e
 GROUP BY e.dt, e.`event`, e.event_group, e.project;
 
--- ========== 7. 存算分离状态验证 ==========
--- 执行后应看到 built-in Storage Volume 指向 s3://lakehouse
+-- ========== 7. 用户与 Resource Group 工作负载隔离 ==========
+-- 通过 User + Resource Group + exclusive_cpu_cores 实现 ETL/Query CPU 硬隔离
+-- CN 支持 --scale 弹性伸缩，Resource Group 自动在所有节点生效
+--
+-- 隔离模型（每个 CN 节点上）：
+--   ┌─────────────────────────────────────────────────┐
+--   │  Exclusive Cores (rg_etl)  │  Shared Cores       │
+--   │  Pipe INSERT / Broker Load │  rg_query (weight=8) │
+--   │  独占 2 核，不受查询影响    │  default_mv_wg (w=2) │
+--   │                             │  default_wg (其他)   │
+--   └─────────────────────────────────────────────────┘
+--
+-- 用户分离：
+--   root    — Pipe 内部 INSERT、管理操作 → rg_etl / default_wg
+--   analyst — 应用层查询（Dashboard/报表/API）→ rg_query
+
+-- ---- 7.1 创建查询专用用户 ----
+CREATE USER IF NOT EXISTS 'analyst' IDENTIFIED BY 'analyst';
+GRANT SELECT ON ALL TABLES IN DATABASE ods TO 'analyst';
+GRANT USAGE ON CATALOG pg_catalog TO 'analyst';
+
+-- ---- 7.2 ETL 资源组（CPU 硬隔离）----
+-- exclusive_cpu_cores=2: 独占 2 个核心，Pipe INSERT 不受查询负载影响
+-- 开发环境 CPU 核心少时可调为 1；生产环境按 CN 核心数 20~30% 分配
+CREATE RESOURCE GROUP IF NOT EXISTS rg_etl
+TO (query_type in ('insert'))
+WITH (
+    'exclusive_cpu_cores' = '2',
+    'mem_limit' = '40%',
+    'concurrency_limit' = '8'
+);
+
+-- ---- 7.3 查询资源组 ----
+-- cpu_weight=8: 在 Shared Cores 中获得最高 CPU 份额
+-- analyst 用户的 SELECT 自动路由到此资源组
+CREATE RESOURCE GROUP IF NOT EXISTS rg_query
+TO (user='analyst', query_type in ('select'))
+WITH (
+    'cpu_weight' = '8',
+    'mem_limit' = '60%',
+    'concurrency_limit' = '0',
+    'big_query_cpu_second_limit' = '300',
+    'big_query_scan_rows_limit' = '5000000000',
+    'big_query_mem_limit' = '2147483648'
+);
+
+-- ---- 7.4 调优 MV 刷新资源组（系统内置）----
+ALTER RESOURCE GROUP default_mv_wg WITH (
+    'cpu_weight' = '2',
+    'mem_limit' = '30%',
+    'concurrency_limit' = '3'
+);
+
+-- ========== 8. 存算分离状态验证 ==========
 -- SHOW STORAGE VOLUMES;
 -- DESC STORAGE VOLUME builtin_storage_volume;
--- 查看 DataCache 命中率：
 -- SHOW PROC '/datacache';
+-- SHOW RESOURCE GROUPS ALL;
+-- SHOW USAGE RESOURCE GROUPS;
+-- SHOW COMPUTE NODES;
+--
+-- 应用层查询连接：mysql -h 127.0.0.1 -P 9030 -u analyst -panalyst
+-- CN 弹性伸缩：docker compose up -d --scale starrocks-cn=N

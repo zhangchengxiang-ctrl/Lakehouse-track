@@ -9,24 +9,24 @@
 #   replay              重放 test_data 中的神策日志
 #   reset               清除数据并重建（含 flink.sql、starrocks.sql）
 #   run-sql             执行 SQL（无 ARGS 时执行 flink + starrocks）
-#   create-project       创建埋点项目（从种子表克隆）
 #   download-starrocks-jars  仅下载 StarRocks 外部目录依赖
+#   bench               压力测试（wrk 渐进式 100→5K 并发）
+#   scale-cn            StarRocks CN 弹性伸缩
 #   help                显示帮助（默认目标）
 #
 # 示例：
 #   make install
 #   make replay
-#   make run-sql
 #   make run-sql ARGS=flink
-#   make run-sql ARGS="starrocks"
-#   make create-project ARGS="production 正式项目"
+#   make bench
+#   make scale-cn ARGS=4
 # ============================================================
 
 # 项目根目录与脚本路径（与 Makefile 同目录）
 ROOT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 LAKEHOUSE_SH := $(ROOT_DIR)scripts/lakehouse.sh
 
-.PHONY: help install fix verify replay reset run-sql create-project download-starrocks-jars
+.PHONY: help install fix verify replay reset run-sql download-starrocks-jars bench scale-cn
 
 .DEFAULT_GOAL := help
 
@@ -40,8 +40,9 @@ help:
 	@echo "  replay                 重放 test_data 中的神策日志"
 	@echo "  reset                  清除数据并重建（含 flink.sql、starrocks.sql）"
 	@echo "  run-sql [ARGS=flink|starrocks]  执行 SQL（无 ARGS 时执行 flink + starrocks）"
-	@echo "  create-project ARGS=\"name [cname]\"  创建埋点项目（从种子表克隆）"
 	@echo "  download-starrocks-jars  仅下载 StarRocks 外部目录依赖"
+	@echo "  bench                  压力测试（wrk 渐进式 100→10K 并发）"
+	@echo "  scale-cn ARGS=N        StarRocks CN 弹性伸缩到 N 个节点"
 	@echo "  help                   显示此帮助（默认）"
 	@echo ""
 	@echo "示例:"
@@ -66,8 +67,14 @@ reset:
 run-sql:
 	@$(LAKEHOUSE_SH) run-sql $(ARGS)
 
-create-project:
-	@$(ROOT_DIR)scripts/create_project.sh $(ARGS)
-
 download-starrocks-jars:
 	@$(LAKEHOUSE_SH) download-starrocks-jars
+
+bench:
+	@$(ROOT_DIR)scripts/bench.sh $(ARGS)
+
+scale-cn:
+	@N=$(or $(ARGS),2); \
+	echo "⚡ Scaling StarRocks CN to $$N nodes..."; \
+	docker compose up -d --scale starrocks-cn=$$N --no-recreate; \
+	echo "✓ Done. Verify: mysql -h 127.0.0.1 -P 9030 -u root -e 'SHOW COMPUTE NODES;'"

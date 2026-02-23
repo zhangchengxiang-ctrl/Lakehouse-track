@@ -56,15 +56,12 @@ sources:
   nginx_logs:
     type: "file"
     include:
-      - "/var/log/nginx/access.log*"    # 通配：access.log + .1 .2 .3 .4 .5 所有轮转文件
-    exclude:
-      - "/var/log/nginx/access.log*.gz"  # 排除压缩文件（只读纯文本）
+      - "/var/log/nginx/access_*.log"   # 按小时切分：access_2026022315.log
     read_from: "beginning"
-    # 磁盘 checkpoint，重启不重复消费
     data_dir: "/var/lib/vector"
-    # 高吞吐场景：增大读取速度
-    max_read_bytes: 1048576              # 每次读 1MB（默认 2KB 太小）
-    oldest_first: true                   # 先消费旧文件，保证顺序
+    max_read_bytes: 2097152
+    max_line_bytes: 1048576
+    oldest_first: true
 
 # ---------- Transforms ----------
 transforms:

@@ -29,7 +29,7 @@ from urllib.parse import unquote, parse_qs, quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
-NGINX_URL = "http://localhost/sa"
+NGINX_URL = "http://localhost:8080/sa"
 TEST_DATA_DIR = "test_data"
 
 SESSION = requests.Session()

@@ -3,8 +3,12 @@
 # 用法：docker compose up -d --build --scale collection=2
 #
 # 双链路架构：
-#   埋点采集：SDK → LB(云服务) → [Nginx+Vector+MetaSync] x N → S3 (TSV.gz) → StarRocks Pipe
+#   埋点采集：SDK → [Nginx+Vector+MetaSync] x N → S3 (TSV.gz) → StarRocks Pipe
 #   CDC 入湖：PostgreSQL → Flink CDC → Paimon → StarRocks Paimon Catalog
+#
+# CN 弹性伸缩（存算分离，无状态）：
+#   扩容：docker compose up -d --scale starrocks-cn=4
+#   缩容：docker compose up -d --scale starrocks-cn=1  (SIGTERM 自动从 FE 注销)
 #
 # 前置准备：
 #   1. make install
@@ -77,7 +81,7 @@ services:
       - lakehouse-net
 
   # ==================== 埋点采集链路 ====================
-  # SDK → LB(云服务) → Collection (Nginx+Vector+MetaSync) → S3 → StarRocks
+  # SDK → Collection (Nginx+Vector+MetaSync) x N → S3 → StarRocks
 
   # 采集节点 (Nginx + Vector + MetaSync)，无状态可水平扩展
   collection:
@@ -85,6 +89,8 @@ services:
       context: .
       dockerfile: services/collection/Dockerfile
     mem_limit: 4g
+    ports:
+      - "${COLLECTION_PORT:-8080}:80"
     env_file: .env
     environment:
       PG_HOST: ${PG_HOST:-postgres}
@@ -107,6 +113,12 @@ services:
       - ./services/collection/config/sdk_debug:/etc/nginx/sdk_debug:ro
       # 注：使用 anonymous volumes 让每个 collection 实例拥有独立的 buffer
       # 容器 restart 不丢数据，recreate/rebuild 会重置（生产用 K8s PVC 持久化）
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     depends_on:
       postgres:
         condition: service_healthy
@@ -271,11 +283,15 @@ services:
     networks:
       - lakehouse-net
 
+  # CN (Compute Node)：无状态计算节点，统一配置，支持弹性伸缩
+  # 扩容：docker compose up -d --scale starrocks-cn=4
+  # 缩容：docker compose up -d --scale starrocks-cn=1 (SIGTERM 自动注销)
+  # 工作负载隔离由 Resource Group + exclusive_cpu_cores 实现（见 starrocks.sql）
   starrocks-cn:
     image: starrocks/cn-ubuntu:3.5.12
-    container_name: starrocks-cn
-    hostname: starrocks-cn
     mem_limit: 4g
+    deploy:
+      replicas: 2
     environment:
       - HOST_TYPE=FQDN
       - JAVA_TOOL_OPTIONS=--add-opens=java.base/java.util=ALL-UNNAMED
@@ -283,7 +299,7 @@ services:
       - /bin/bash
       - -c
       - |
-        # 注入 CN 缓存配置（追加到 cn.conf 末尾）
+        CN_HOST=$$(hostname -f)
         if [ -f /opt/starrocks-cn-shared.conf ] && ! grep -q "LAKEHOUSE_TRACK_CN_CONF" /opt/starrocks/cn/conf/cn.conf 2>/dev/null; then
           {
             echo ""
@@ -297,27 +313,34 @@ services:
           ln -sf /opt/starrocks-extra-jars/*.jar /opt/starrocks/cn/lib/paimon-ext/
         fi
         sleep 15
-        mysql -h starrocks-fe -P9030 -uroot -e "SHOW COMPUTE NODES" | grep -q "starrocks-cn" || \
-        mysql -h starrocks-fe -P9030 -uroot -e "ALTER SYSTEM ADD COMPUTE NODE 'starrocks-cn:9050';"
-        /opt/starrocks/cn/bin/start_cn.sh
-    ports:
-      - "8040:8040"
+        mysql -h starrocks-fe -P9030 -uroot -e "SHOW COMPUTE NODES" | grep -q "$$CN_HOST" || \
+        mysql -h starrocks-fe -P9030 -uroot -e "ALTER SYSTEM ADD COMPUTE NODE '$$CN_HOST:9050';"
+        _term() {
+          mysql -h starrocks-fe -P9030 -uroot \
+            -e "ALTER SYSTEM DROP COMPUTE NODE '$$CN_HOST:9050';" 2>/dev/null || true
+          kill -TERM "$$CN_PID" 2>/dev/null
+          wait "$$CN_PID" 2>/dev/null
+          exit 0
+        }
+        trap _term SIGTERM SIGINT
+        /opt/starrocks/cn/bin/start_cn.sh &
+        CN_PID=$$!
+        wait $$CN_PID
     volumes:
       - ./services/starrocks/config/cn.conf:/opt/starrocks-cn-shared.conf:ro
       - ./services/starrocks/jars:/opt/starrocks-extra-jars:ro
-      - ./data/starrocks/cn/storage:/opt/starrocks/cn/storage
-      - ./data/starrocks/cn/datacache:/opt/starrocks/cn/datacache
     depends_on:
       starrocks-fe:
         condition: service_healthy
       minio:
         condition: service_started
     healthcheck:
-      test: ["CMD-SHELL", "mysql -uroot -hstarrocks-fe -P9030 -e 'SHOW COMPUTE NODES' | grep 'starrocks-cn' | grep -q '1'"]
+      test: ["CMD-SHELL", "mysql -uroot -hstarrocks-fe -P9030 -e 'SHOW COMPUTE NODES' | grep $$(hostname -f) | grep -q true"]
       interval: 15s
       timeout: 10s
       retries: 10
       start_period: 180s
+    stop_grace_period: 30s
     restart: on-failure
     networks:
       - lakehouse-net
