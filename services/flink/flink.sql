@@ -1,14 +1,13 @@
 -- ============================================================
 -- Flink CDC 入湖：PostgreSQL → Paimon → StarRocks Paimon Catalog
 --
--- 执行方式：
---   docker compose exec -T flink-jobmanager bash -c \
---     "cat /opt/flink/flink.sql | ./bin/sql-client.sh"
---   或通过 ./scripts/lakehouse.sh run-sql flink
+-- 执行方式：make run-sql ARGS=flink
 --
--- 说明：
---   本文件仅负责 CDC 链路。埋点采集链路由 Vector → S3 TSV → StarRocks Pipe 处理，
---   不经过 Flink，详见 services/starrocks/starrocks.sql。
+-- 本文件仅负责 CDC 链路。埋点采集链路由 Vector → S3 TSV → StarRocks Pipe 处理，
+-- 不经过 Flink，详见 services/starrocks/starrocks.sql。
+--
+-- 注意：Flink SQL 不支持环境变量。以下 S3/PG 连接参数使用 Docker 内部默认值，
+-- HMS URI 由 lakehouse.sh 在运行时通过 sed 注入。如需修改请同步更新 .env。
 -- ============================================================
 
 SET 'parallelism.default' = '1';

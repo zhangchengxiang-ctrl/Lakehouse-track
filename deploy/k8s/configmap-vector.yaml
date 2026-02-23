@@ -337,7 +337,7 @@ data:
       to_meta_api:
         type: "http"
         inputs: ["format_meta_payload"]
-        uri: "${META_API_URL:-http://meta-api:3000/register}"
+        uri: "${META_API_URL:-http://127.0.0.1:3000/register}"
         method: "post"
         encoding:
           codec: "json"

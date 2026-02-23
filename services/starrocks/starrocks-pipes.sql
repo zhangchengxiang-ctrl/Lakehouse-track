@@ -1,6 +1,7 @@
 -- StarRocks PIPE 定义（从 S3 增量摄入）
 -- PIPE 依赖 S3 路径中存在 .tsv.gz 数据文件才能创建
 -- 首次 reset 时由 lakehouse.sh 延迟重试创建
+-- 注意：S3 凭证为 Docker 内部默认值，与 .env 中 S3_* 一致
 
 -- ========== events PIPE ==========
 -- Vector 写入路径：s3://lakehouse/track/events/dt={date}/hour={hour}/{uuid}.tsv.gz

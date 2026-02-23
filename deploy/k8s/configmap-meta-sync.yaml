@@ -15,7 +15,7 @@ data:
     PG_PORT="${PG_PORT:-5432}"
     PG_USER="${PG_USER:-postgres}"
     PG_DB="${PG_DB:-postgres}"
-    PG_SCHEMA="${PG_SCHEMA:-StellarTrace}"
+    PG_SCHEMA="${PG_SCHEMA:-stellar_trace}"
     export PGPASSWORD="${PG_PASSWORD:-postgres}"
     export PGOPTIONS="-c search_path=${PG_SCHEMA}"
 

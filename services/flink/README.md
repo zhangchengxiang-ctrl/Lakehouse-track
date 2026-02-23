@@ -1,18 +1,15 @@
 # Flink 目录
 
-Flink 相关内容统一存放于此。
-
-| 子目录 | 说明 |
-|--------|------|
+| 子目录/文件 | 说明 |
+|-------------|------|
 | `config/` | Flink 集群配置 |
-| `lib/` | 依赖 JAR（`scripts/download-jars.sh` 下载） |
-| `dist/` | StreamPark 挂载的 Flink 发行版（运行时生成） |
-| `flink.sql` | 合并脚本（Catalog、表、入湖、CDC） |
-| `scripts/` | 下载 JAR 等工具脚本 |
+| `lib/` | 依赖 JAR（`scripts/download-jars.sh` 下载，已 gitignore） |
+| `flink.sql` | CDC 入湖脚本（Catalog + 源表 + 目标表 + INSERT） |
+| `scripts/` | JAR 下载等工具脚本 |
 
-## 执行顺序
+## 执行方式
 
-1. `bash services/flink/scripts/download-jars.sh`
-2. `docker compose up -d --build`
-3. `docker compose exec flink-jobmanager ./bin/sql-client.sh`
-4. 执行 `docker compose exec flink-jobmanager ./bin/sql-client.sh -f /opt/flink/flink.sql`
+```bash
+make install            # 下载依赖 JAR
+make run-sql ARGS=flink # 提交 Flink CDC 作业
+```

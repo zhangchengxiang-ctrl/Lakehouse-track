@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<!-- 基础配置：PG 连接由 docker-compose SERVICE_OPTS 覆盖，S3 由 AWS_* 环境变量覆盖 -->
 <configuration>
   <property>
     <name>javax.jdo.option.ConnectionURL</name>

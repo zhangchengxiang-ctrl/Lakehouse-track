@@ -1,5 +1,5 @@
 -- CDC 测试表（PG CDC → Paimon）
--- 独立 schema cdc_test，与业务 schema StellarTrace 隔离
+-- 独立 schema cdc_test，与业务 schema stellar_trace 隔离
 -- 需 wal_level=logical（docker-compose 已配置）
 
 ALTER USER postgres WITH REPLICATION;

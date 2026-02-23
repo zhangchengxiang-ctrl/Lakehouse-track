@@ -37,7 +37,7 @@ pool: asyncpg.Pool = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global pool
-    pg_schema = os.getenv("PG_SCHEMA", "StellarTrace")
+    pg_schema = os.getenv("PG_SCHEMA", "stellar_trace")
     pool = await asyncpg.create_pool(
         PG_DSN,
         min_size=2,

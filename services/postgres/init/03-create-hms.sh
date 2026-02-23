@@ -1,5 +1,5 @@
 #!/bin/bash
-# Hive Metastore 专用库（业务表在默认库的 schema StellarTrace，见 02）
+# Hive Metastore 专用库（业务表在默认库的 schema stellar_trace，见 02）
 # 库名取自 .env 中的 HMS_DB，默认 metastore
 set -euo pipefail
 

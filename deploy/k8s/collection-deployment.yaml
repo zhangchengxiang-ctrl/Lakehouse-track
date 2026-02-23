@@ -165,7 +165,7 @@ spec:
                   name: lakehouse-secrets
                   key: S3_SECRET_KEY
             - name: META_API_URL
-              value: "http://meta-api:3000/register"
+              value: "http://127.0.0.1:3000/register"
           volumeMounts:
             - name: vector-config
               mountPath: /etc/vector/vector.yaml

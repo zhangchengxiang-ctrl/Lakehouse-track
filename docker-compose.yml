@@ -3,7 +3,7 @@
 # 用法：docker compose up -d --build --scale collection=2
 #
 # 双链路架构：
-#   埋点采集：SDK → [Nginx+Vector+MetaSync] x N → S3 (TSV.gz) → StarRocks Pipe
+#   埋点采集：SDK → [Nginx+Vector+MetaAPI+MetaSync] x N → S3 (TSV.gz) → StarRocks Pipe
 #   CDC 入湖：PostgreSQL → Flink CDC → Paimon → StarRocks Paimon Catalog
 #
 # CN 弹性伸缩（存算分离，无状态）：
@@ -19,7 +19,7 @@
 
 services:
   # ==================== 基础设施 ====================
-  # Postgres：默认库 postgres，业务表在 schema StellarTrace（02/04）；metastore 为独立库仅给 Hive
+  # Postgres：默认库 postgres，业务表在 schema stellar_trace（02/04）；metastore 为独立库仅给 Hive
   postgres:
     image: postgres:16
     command: ["postgres", "-c", "wal_level=logical"]   # CDC 必需
@@ -81,9 +81,9 @@ services:
       - lakehouse-net
 
   # ==================== 埋点采集链路 ====================
-  # SDK → Collection (Nginx+Vector+MetaSync) x N → S3 → StarRocks
+  # SDK → Collection (Nginx+Vector+MetaAPI+MetaSync) x N → S3 → StarRocks
 
-  # 采集节点 (Nginx + Vector + MetaSync)，无状态可水平扩展
+  # 采集节点 (Nginx + Vector + MetaAPI + MetaSync)，无状态可水平扩展
   collection:
     build:
       context: .
@@ -92,22 +92,6 @@ services:
     ports:
       - "${COLLECTION_PORT:-8080}:80"
     env_file: .env
-    environment:
-      PG_HOST: ${PG_HOST:-postgres}
-      PG_PORT: ${PG_PORT:-5432}
-      PG_USER: ${PG_USER:-postgres}
-      PG_PASSWORD: ${PG_PASSWORD:-postgres}
-      PG_DB: ${PG_DB:-postgres}
-      PG_SCHEMA: ${PG_SCHEMA:-StellarTrace}
-      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
-      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
-      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
-      S3_BUCKET: ${S3_BUCKET:-lakehouse}
-      S3_REGION: ${S3_REGION:-us-east-1}
-      META_API_URL: ${META_API_URL:-http://meta-api:3000/register}
-      META_SYNC_INTERVAL: ${META_SYNC_INTERVAL:-30}
-      VECTOR_LOG: ${VECTOR_LOG:-info}
-      DEPLOY_ENV: ${DEPLOY_ENV:-dev}
     volumes:
       - ./services/collection/config/geoip:/etc/vector/geoip:ro
       - ./services/collection/config/sdk_debug:/etc/nginx/sdk_debug:ro
@@ -124,30 +108,6 @@ services:
         condition: service_healthy
       minio:
         condition: service_started
-    restart: on-failure
-    networks:
-      - lakehouse-net
-
-  # 元数据注册 API
-  meta-api:
-    build:
-      context: .
-      dockerfile: services/meta-api/Dockerfile
-    mem_limit: 256m
-    ports:
-      - "3000:3000"
-    env_file: .env
-    environment:
-      PG_HOST: ${PG_HOST:-postgres}
-      PG_PORT: ${PG_PORT:-5432}
-      PG_USER: ${PG_USER:-postgres}
-      PG_PASSWORD: ${PG_PASSWORD:-postgres}
-      PG_DB: ${PG_DB:-postgres}
-      PG_SCHEMA: ${PG_SCHEMA:-StellarTrace}
-      PG_POOL_MAX: ${PG_POOL_MAX:-20}
-    depends_on:
-      postgres:
-        condition: service_healthy
     restart: on-failure
     networks:
       - lakehouse-net

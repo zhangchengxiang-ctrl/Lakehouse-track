@@ -1,7 +1,7 @@
 # ============================================================
 # Vector Scale 配置：多节点分布式模式
 #   1. 直写 S3 (TSV.gz 大批次)，StarRocks Pipe 增量入库
-#   2. HTTP Sink 指向独立 Meta API 服务
+#   2. HTTP Sink 指向本地 Meta API (uvicorn@127.0.0.1:3000)
 #   3. 磁盘缓冲 10GB，峰值不丢数据
 #
 # Transform 流水线（优化后 7 步，原 12 步）：
@@ -738,7 +738,7 @@ sinks:
   to_meta_api:
     type: "http"
     inputs: ["format_meta_payload"]
-    uri: "${META_API_URL:-http://meta-api:3000/register}"
+    uri: "${META_API_URL:-http://127.0.0.1:3000/register}"
     method: "post"
     encoding:
       codec: "json"

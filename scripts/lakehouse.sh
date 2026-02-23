@@ -48,9 +48,7 @@ run_flink_sql() {
   [ -z "$f" ] && f="services/flink/flink.sql"
   echo ">>> $f (Flink)"
 
-  # 终极修复：使用“交互模式 stdin”一次性执行整份脚本（单 Session）
-  # 背景：Flink 1.18.1 的 sql-client 在 -f 模式下可能触发 only single statement supported，
-  # 但交互模式可以逐条解析并保持会话态（Catalog/临时表均有效）。
+  # stdin 交互模式执行整份脚本（单 Session），保持 Catalog/临时表会话态
   docker compose exec -T -e HMS_URI="${HMS_URI:-thrift://hive-metastore:9083}" \
     flink-jobmanager bash -c \
     "cp /opt/flink/flink.sql /tmp/run.sql && \
@@ -83,11 +81,11 @@ run_starrocks_sql() {
   _run_mysql -e "CREATE EXTERNAL CATALOG paimon_catalog PROPERTIES (\
     \"type\" = \"paimon\",\
     \"paimon.catalog.type\" = \"hive\",\
-    \"hive.metastore.uris\" = \"thrift://hive-metastore:9083\",\
-    \"paimon.catalog.warehouse\" = \"s3a://lakehouse/paimon_data\",\
-    \"aws.s3.endpoint\" = \"http://minio:9000\",\
-    \"aws.s3.access_key\" = \"minioadmin\",\
-    \"aws.s3.secret_key\" = \"minioadmin\",\
+    \"hive.metastore.uris\" = \"${HMS_URI:-thrift://hive-metastore:9083}\",\
+    \"paimon.catalog.warehouse\" = \"s3a://${S3_BUCKET:-lakehouse}/paimon_data\",\
+    \"aws.s3.endpoint\" = \"${S3_ENDPOINT:-http://minio:9000}\",\
+    \"aws.s3.access_key\" = \"${S3_ACCESS_KEY:-minioadmin}\",\
+    \"aws.s3.secret_key\" = \"${S3_SECRET_KEY:-minioadmin}\",\
     \"aws.s3.enable_ssl\" = \"false\",\
     \"aws.s3.enable_path_style_access\" = \"true\"\
   )" 2>/dev/null || true
@@ -328,13 +326,7 @@ cmd_reset() {
     docker compose exec -T postgres pg_isready -U postgres 2>/dev/null && break
     sleep 5
   done
-  echo "  初始化 Postgres 元数据库（metastore）..."
-  if ! docker compose exec -T postgres psql -U postgres -d postgres -tAc \
-    "SELECT 1 FROM pg_database WHERE datname = 'metastore'" 2>/dev/null | grep -q 1; then
-    docker compose exec -T postgres psql -U postgres -d postgres -c "CREATE DATABASE metastore" 2>/dev/null || true
-  fi
-  docker compose exec -T postgres psql -U postgres -d postgres -c \
-    "GRANT ALL PRIVILEGES ON DATABASE metastore TO postgres" 2>/dev/null || true
+  # metastore 库由 services/postgres/init/03-create-hms.sh 自动创建
   echo "  等待 MinIO..."
   sleep 10
   # 本项目使用 Hive Metastore，等待 9083 端口就绪，避免 hive CLI 偶发阻塞

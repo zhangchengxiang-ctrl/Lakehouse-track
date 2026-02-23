@@ -179,8 +179,8 @@ PROPERTIES (
 );
 
 -- ========== 5. CDC 链路：JDBC 外部目录 ==========
--- 直读 PostgreSQL，用于轻量级维度查询
--- Paimon Catalog 由 scripts/lakehouse.sh run-sql 脚本创建，此处不重复定义
+-- 直读 PostgreSQL，用于轻量级维度查询（凭证与 .env 中 PG_* 一致）
+-- Paimon Catalog 由 lakehouse.sh run-sql 创建（支持环境变量），此处不重复定义
 CREATE EXTERNAL CATALOG IF NOT EXISTS pg_catalog
 PROPERTIES (
     "type" = "jdbc",
@@ -191,7 +191,7 @@ PROPERTIES (
     "driver_class" = "org.postgresql.Driver"
 );
 
--- ========== 6. DWS 每日事件统计（直接聚合 ods_events 生成列）==========
+-- ========== 6. DWS 每日事件统计 ==========
 -- 生成列已在写入时物理存储，聚合无需 JSON 解析，等同普通列
 -- 分区对齐增量刷新，partition_refresh_number=3 防止积压雪崩
 CREATE MATERIALIZED VIEW IF NOT EXISTS ods.dws_daily_event_stats
@@ -213,7 +213,7 @@ SELECT
 FROM ods.ods_events
 GROUP BY dt, `event`, event_group, project, lib, country;
 
--- ========== 8. DWD 用户宽表 ==========
+-- ========== 7. DWD 用户宽表 ==========
 -- 面向用户分群、画像查询、Cohort 分析
 -- PRIMARY KEY 模型，由定时 TASK 从 ods_events 聚合生成
 CREATE TABLE IF NOT EXISTS ods.dwd_users (
@@ -249,7 +249,7 @@ PROPERTIES (
     "datacache.enable" = "true"
 );
 
--- ========== 9. 定时任务：刷新 dwd_users ==========
+-- ========== 8. 定时任务：刷新 dwd_users ==========
 -- 每 10 分钟从 ods_events 聚合用户画像，INSERT OVERWRITE 全量刷新
 -- 直接使用生成列（lib/os/country 等），无需 json_query
 SUBMIT TASK refresh_dwd_users
@@ -283,7 +283,7 @@ SELECT
 FROM ods.ods_events e
 GROUP BY e.project, e.distinct_id;
 
--- ========== 9.2 事件生命周期清理（外部调度）==========
+-- ========== 8.1 事件生命周期清理（外部调度）==========
 -- StarRocks SUBMIT TASK 仅支持 INSERT，DELETE 需外部调度执行
 -- 按 event_group 差异化保留：
 --   CORE  → 365 天（dynamic_partition.start=-365，超期分区自动删除）
@@ -299,7 +299,7 @@ GROUP BY e.project, e.distinct_id;
 -- crontab 示例（每天 03:00 执行）：
 --   0 3 * * * cd /path/to/Lakehouse-track && make lifecycle-cleanup
 
--- ========== 10. 用户与 Resource Group 工作负载隔离 ==========
+-- ========== 9. 用户与 Resource Group 工作负载隔离 ==========
 -- 通过 User + Resource Group + exclusive_cpu_cores 实现 ETL/Query CPU 硬隔离
 -- CN 支持 --scale 弹性伸缩，Resource Group 自动在所有节点生效
 --
@@ -315,12 +315,12 @@ GROUP BY e.project, e.distinct_id;
 --   root    — Pipe 内部 INSERT、管理操作 → rg_etl / default_wg
 --   analyst — 应用层查询（Dashboard/报表/API）→ rg_query
 
--- ---- 7.1 创建查询专用用户 ----
+-- ---- 9.1 创建查询专用用户 ----
 CREATE USER IF NOT EXISTS 'analyst' IDENTIFIED BY 'analyst';
 GRANT SELECT ON ALL TABLES IN DATABASE ods TO 'analyst';
 GRANT USAGE ON CATALOG pg_catalog TO 'analyst';
 
--- ---- 7.2 ETL 资源组（CPU 硬隔离）----
+-- ---- 9.2 ETL 资源组（CPU 硬隔离）----
 -- exclusive_cpu_cores=2: 独占 2 个核心，Pipe INSERT 不受查询负载影响
 -- 开发环境 CPU 核心少时可调为 1；生产环境按 CN 核心数 20~30% 分配
 CREATE RESOURCE GROUP IF NOT EXISTS rg_etl
@@ -331,7 +331,7 @@ WITH (
     'concurrency_limit' = '8'
 );
 
--- ---- 7.3 查询资源组 ----
+-- ---- 9.3 查询资源组 ----
 -- cpu_weight=8: 在 Shared Cores 中获得最高 CPU 份额
 -- analyst 用户的 SELECT 自动路由到此资源组
 CREATE RESOURCE GROUP IF NOT EXISTS rg_query
@@ -345,14 +345,14 @@ WITH (
     'big_query_mem_limit' = '2147483648'
 );
 
--- ---- 7.4 调优 MV 刷新资源组（系统内置）----
+-- ---- 9.4 调优 MV 刷新资源组（系统内置）----
 ALTER RESOURCE GROUP default_mv_wg WITH (
     'cpu_weight' = '2',
     'mem_limit' = '30%',
     'concurrency_limit' = '3'
 );
 
--- ========== 11. 存算分离状态验证 ==========
+-- ========== 附录：存算分离状态验证 ==========
 -- SHOW STORAGE VOLUMES;
 -- DESC STORAGE VOLUME builtin_storage_volume;
 -- SHOW PROC '/datacache';

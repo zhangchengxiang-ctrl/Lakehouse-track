@@ -14,7 +14,6 @@ resources:
   # Workloads
   - collection-deployment.yaml
   - hpa-collection.yaml
-  - meta-api-deployment.yaml
   - postgres-statefulset.yaml
   - minio-statefulset.yaml
   - starrocks-fe.yaml

@@ -1,7 +1,7 @@
--- 埋点元数据表：全部在 schema StellarTrace（默认库 postgres）
+-- 埋点元数据表：全部在 schema stellar_trace（默认库 postgres）
 -- 库：postgres（默认）| metastore（仅 Hive，见 03）
-CREATE SCHEMA IF NOT EXISTS StellarTrace;
-SET search_path TO StellarTrace;
+CREATE SCHEMA IF NOT EXISTS stellar_trace;
+SET search_path TO stellar_trace;
 DROP TABLE IF EXISTS track_event_property;
 DROP TABLE IF EXISTS track_event_define;
 DROP TABLE IF EXISTS track_property_define;

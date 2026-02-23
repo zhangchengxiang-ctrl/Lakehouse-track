@@ -13,7 +13,7 @@ PG_HOST="${PG_HOST:-postgres}"
 PG_PORT="${PG_PORT:-5432}"
 PG_USER="${PG_USER:-postgres}"
 PG_DB="${PG_DB:-postgres}"
-PG_SCHEMA="${PG_SCHEMA:-StellarTrace}"
+PG_SCHEMA="${PG_SCHEMA:-stellar_trace}"
 export PGPASSWORD="${PG_PASSWORD:-postgres}"
 # 连接后默认 schema，SQL 中无需写 schema 前缀
 export PGOPTIONS="-c search_path=${PG_SCHEMA}"
