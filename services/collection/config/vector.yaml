@@ -150,7 +150,6 @@ transforms:
   sa_process:
     type: "remap"
     inputs: ["sa_unnest"]
-    drop_on_abort: true
     source: |
       # ---- 字段标准化（原 sa_normalize）----
       if exists(.sa_payloads) && is_object(.sa_payloads) {
@@ -191,7 +190,11 @@ transforms:
               if is_string(anonymous_id) { .anonymous_id = anonymous_id }
               if is_string(original_id) { .original_id = original_id }
           } else {
-              abort
+              .properties."$$_data_quality" = "invalid_distinct_id"
+              raw_did = string(.distinct_id) ?? ""
+              if raw_did == "" || raw_did == "-1" {
+                  .distinct_id = "__invalid__"
+              }
           }
 
           if exists(.type) && .type == "track_signup" && is_string(original_id) && original_id != "" {
@@ -220,6 +223,14 @@ transforms:
                   .properties."$$os" = "iOS"
               } else if os_name == "android" {
                   .properties."$$os" = "Android"
+              } else if starts_with(os_name, "windows") || starts_with(os_name, "win") {
+                  .properties."$$os" = "Windows"
+              } else if os_name == "mac" || starts_with(os_name, "macos") || starts_with(os_name, "mac os") {
+                  .properties."$$os" = "macOS"
+              } else if os_name == "linux" || starts_with(os_name, "linux") {
+                  .properties."$$os" = "Linux"
+              } else if os_name == "harmonyos" || os_name == "harmony" {
+                  .properties."$$os" = "HarmonyOS"
               }
           }
 
@@ -273,53 +284,7 @@ transforms:
               del(.properties.event_duration)
           }
 
-          if exists(.http_user_agent) && .http_user_agent != "-" {
-              ua_str = string!(.http_user_agent)
-              if !exists(.properties."$$user_agent") {
-                  .properties."$$user_agent" = ua_str
-              }
-
-              if !match(ua_str, r'^SensorsAnalytics') {
-                  ua, err = parse_user_agent(.http_user_agent)
-                  if err == null {
-                      .ua_browser = if exists(ua.browser) { ua.browser.name } else { null }
-                      .ua_os = if exists(ua.os) { ua.os.name } else { null }
-                      .ua_device = if exists(ua.device) { ua.device.family } else { null }
-
-                      if exists(ua.os) {
-                          if exists(ua.os.name) && !exists(.properties."$$os") {
-                              .properties."$$os" = ua.os.name
-                          }
-                          if exists(ua.os.version) && !exists(.properties."$$os_version") {
-                              .properties."$$os_version" = ua.os.version
-                          }
-                      }
-                      if exists(ua.browser) {
-                          if exists(ua.browser.name) && !exists(.properties."$$browser") {
-                              .properties."$$browser" = ua.browser.name
-                          }
-                          if exists(ua.browser.version) && !exists(.properties."$$browser_version") {
-                              .properties."$$browser_version" = ua.browser.version
-                          }
-                      }
-                      if exists(ua.device) {
-                          if exists(ua.device.brand) && !exists(.properties."$$manufacturer") {
-                              .properties."$$manufacturer" = ua.device.brand
-                          }
-                          if exists(ua.device.model) && !exists(.properties."$$model") {
-                              .properties."$$model" = ua.device.model
-                          }
-                          if exists(ua.device.category) && !exists(.properties."$$device_type") {
-                              .properties."$$device_type" = ua.device.category
-                          }
-                      }
-                  }
-              }
-
-              if match(downcase(ua_str), r'(bot|crawler|spider|scrapy)') {
-                  .properties."$$bot_name" = "bot"
-              }
-          }
+          # UA 解析已移至独立 transform ua_parse（file 引用 ua_parser.vrl）
 
           # 时间策略：DEPLOY_ENV=dev 时以 Nginx 采集时间(msec)为准，pro 时优先使用 SDK 上报时间
           deploy_env = "${DEPLOY_ENV:-pro}"
@@ -358,7 +323,11 @@ transforms:
           }
 
           event_name = if is_string(.event) { string!(.event) } else { "" }
-          .event_group = if event_name != "" && match(event_name, r'^debug_') { "DEBUG" } else { if event_name != "" && match(event_name, r'^\$$') { "CORE" } else { "TRACE" } }
+          if exists(.properties."$$_data_quality") {
+              .event_group = "DEBUG"
+          } else {
+              .event_group = if event_name != "" && match(event_name, r'^debug_') { "DEBUG" } else { if event_name != "" && match(event_name, r'^\$$') { "CORE" } else { "TRACE" } }
+          }
           
           del(.sa_payloads)
       } else if is_object(.) && exists(.distinct_id) {
@@ -375,12 +344,48 @@ transforms:
               }
           }
       } else {
-          # 无 distinct_id，丢弃（原 filter_sa_only）
-          abort
+          .properties."$$_data_quality" = "missing_payload"
+          .distinct_id = "__invalid__"
+          .event = "__parse_error__"
       }
 
-      # 最终校验：必须有 distinct_id（原 filter_valid）
-      if !exists(.distinct_id) { abort }
+      # 最终校验：确保 distinct_id 存在（无效数据标记而非丢弃）
+      if !exists(.distinct_id) || !is_string(.distinct_id) || string!(.distinct_id) == "" {
+          .distinct_id = "__invalid__"
+          if !exists(.properties) || !is_object(.properties) { .properties = {} }
+          if !exists(.properties."$$_data_quality") { .properties."$$_data_quality" = "missing_distinct_id" }
+      }
+
+      # 兜底：确保必填字段有值（无效事件也能入库）
+      if !is_timestamp(.time) {
+          if exists(.msec) {
+              msec_val, err = to_float(.msec)
+              if err == null {
+                  fallback_ms = to_int(msec_val * 1000.0)
+                  if fallback_ms > 0 {
+                      .time = from_unix_timestamp!(fallback_ms, unit: "milliseconds")
+                  } else {
+                      .time = now()
+                  }
+              } else {
+                  .time = now()
+              }
+          } else {
+              .time = now()
+          }
+          .timestamp = .time
+          .dt = format_timestamp!(.time, format: "%Y-%m-%d")
+          .hour = format_timestamp!(.time, format: "%H")
+      }
+      if !exists(.event_group) || !is_string(.event_group) {
+          .event_group = "DEBUG"
+      }
+      if !exists(.project) || !is_string(.project) || string!(.project) == "" {
+          .project = if exists(.arg_project) && is_string(.arg_project) && .arg_project != "-" { string!(.arg_project) } else { "default" }
+      }
+      if !exists(.event) || !is_string(.event) {
+          .event = "__unknown__"
+      }
 
       # ---- GeoIP 解析（原 ip_geoip）----
       if !exists(.properties) || !is_object(.properties) {
@@ -397,8 +402,6 @@ transforms:
               condition: {"ip": .properties."$$ip"}
           )
           if err == null && is_object(geo_record) {
-              .geoip = geo_record
-
               if (!exists(.properties."$$country") || .properties."$$country" == "") && exists(geo_record.country_name) {
                   .properties."$$country" = geo_record.country_name
               }
@@ -436,17 +439,93 @@ transforms:
           }
       }
 
-      # ---- properties_keys 提取 ----
-      if is_object(.properties) {
-          props_keys, err = keys(.properties)
-          if err == null {
-              .properties_keys = props_keys
-          }
-      }
-
       # ---- 标记有效 ----
       .is_valid = true
-      .redis_meta = null
+
+  # 3.5 UA 解析（多步骤正则提取：Bot→OS→Browser→Device）
+  ua_parse:
+    type: "remap"
+    inputs: ["sa_process"]
+    file: "/etc/vector/ua_parser.vrl"
+
+  # 3.6 SDK 上报值标准化（UA 解析已在 ua_parser.vrl 中完成）
+  post_normalize:
+    type: "remap"
+    inputs: ["ua_parse"]
+    source: |
+      os_name = string(.properties."$$os") ?? ""
+      os_ver  = string(.properties."$$os_version") ?? ""
+
+      # ---- OS 名称统一（SDK 上报的非标名称）----
+      if os_name == "Mac" || os_name == "Mac OS" || os_name == "mac" {
+          .properties."$$os" = "macOS"
+          os_name = "macOS"
+      }
+      if os_name == "GNU/Linux" { .properties."$$os" = "Linux" }
+      if os_name == "harmonyos" { .properties."$$os" = "HarmonyOS" }
+
+      # ---- Android API Level → 版本号（SDK 部分旧版上报 API Level）----
+      if os_name == "Android" && os_ver != "" {
+          api, aerr = to_int(os_ver)
+          if aerr == null && api >= 21 && api <= 35 {
+              if api >= 21 && api <= 22 { .properties."$$os_version" = "5" }
+              if api == 23 { .properties."$$os_version" = "6" }
+              if api == 24 || api == 25 { .properties."$$os_version" = "7" }
+              if api == 26 { .properties."$$os_version" = "8" }
+              if api == 27 { .properties."$$os_version" = "8.1" }
+              if api == 28 { .properties."$$os_version" = "9" }
+              if api == 29 { .properties."$$os_version" = "10" }
+              if api == 30 { .properties."$$os_version" = "11" }
+              if api == 31 || api == 32 { .properties."$$os_version" = "12" }
+              if api == 33 { .properties."$$os_version" = "13" }
+              if api == 34 { .properties."$$os_version" = "14" }
+              if api == 35 { .properties."$$os_version" = "15" }
+          }
+          norm, nerr = parse_regex(string(.properties."$$os_version") ?? "", r'^(?P<base>\d+)\.0$')
+          if nerr == null { .properties."$$os_version" = string!(norm.base) }
+      }
+
+      # ---- iOS 下划线版本 → 点分版本（SDK 上报 "17_4_1"）----
+      if (os_name == "iOS" || os_name == "iPadOS") && contains(os_ver, "_") {
+          .properties."$$os_version" = replace(os_ver, "_", ".")
+      }
+
+      # ---- Windows SDK 版本标准化（"10.0.22631" → "11", "7sp1" → "7"）----
+      if os_name == "Windows" && os_ver != "" {
+          wm, we = parse_regex(os_ver, r'^(?P<major>\d+)\.(?P<minor>\d+)(?:\.(?P<build>\d+))?$')
+          if we == null {
+              maj = to_int(wm.major) ?? 0
+              min = to_int(wm.minor) ?? 0
+              bld = if exists(wm.build) { to_int(wm.build) ?? 0 } else { 0 }
+              if maj == 5 && min == 0 { .properties."$$os_version" = "2000" }
+              if maj == 5 && (min == 1 || min == 2) { .properties."$$os_version" = "XP" }
+              if maj == 6 && min == 0 { .properties."$$os_version" = "Vista" }
+              if maj == 6 && min == 1 { .properties."$$os_version" = "7" }
+              if maj == 6 && min == 2 { .properties."$$os_version" = "8" }
+              if maj == 6 && min == 3 { .properties."$$os_version" = "8.1" }
+              if maj == 10 && min == 0 {
+                  if bld >= 22000 { .properties."$$os_version" = "11" }
+                  if bld > 0 && bld < 22000 { .properties."$$os_version" = "10" }
+              }
+          }
+          if ends_with(os_ver, "sp1") || ends_with(os_ver, "sp2") || ends_with(os_ver, "sp3") {
+              cleaned, cerr = parse_regex(os_ver, r'^(?P<base>\d+)')
+              if cerr == null { .properties."$$os_version" = string!(cleaned.base) }
+          }
+          if os_ver == "UnKnow" || os_ver == "Unknown" { del(.properties."$$os_version") }
+          if contains(os_ver, "%2E") { .properties."$$os_version" = replace(os_ver, "%2E", ".") }
+      }
+
+      # ---- macOS SDK 版本修正（"OS" bug / 下划线）----
+      if os_name == "macOS" {
+          cur_ver = string(.properties."$$os_version") ?? ""
+          if cur_ver == "OS" || cur_ver == "" {
+              ua = string(.http_user_agent) ?? ""
+              osxm, osxe = parse_regex(ua, r'Mac OS X (?P<ver>\d+[\d_.]+)')
+              if osxe == null { cur_ver = string!(osxm.ver) }
+          }
+          if contains(cur_ver, "_") { .properties."$$os_version" = replace(cur_ver, "_", ".") }
+      }
 
   # 4. 用户 ID Mapping 提取（神策 SDK 身份规则）
   # 从事件流中提取身份映射关系，写入独立 S3 路径
@@ -457,7 +536,7 @@ transforms:
   #   track + login  → anonymous_id 隐式关联到 login_id
   extract_id_mapping:
     type: "remap"
-    inputs: ["sa_process"]
+    inputs: ["post_normalize"]
     source: |
       event_type = if is_string(.type) { string!(.type) } else { "" }
       project = if is_string(.project) { string!(.project) } else { "default" }
@@ -530,9 +609,11 @@ transforms:
   # 5. 提取需注册的元数据（发往 HTTP Sink）
   format_meta_payload:
     type: "remap"
-    inputs: ["sa_process"]
+    inputs: ["post_normalize"]
+    drop_on_abort: true
     source: |
-      if .is_new_event == true || .is_new_props == true {
+      if (.is_new_event == true || .is_new_props == true) && !exists(.properties."$$_data_quality") {
+          prop_keys = if is_object(.properties) { keys(object!(.properties)) } else { [] }
           . = {
               "project": .project,
               "event": .event,
@@ -541,20 +622,21 @@ transforms:
               "login_id": .login_id,
               "original_id": .original_id,
               "properties": .properties,
-              "properties_keys": .properties_keys
+              "properties_keys": prop_keys
           }
       } else {
           abort
       }
 
   # 6. 事件 TSV 格式化（tab 分隔，兼容 StarRocks FILES/Pipe csv 解析）
-  # 注：properties/geoip 在 sa_process 中仍为 object，此处统一做一次 JSON 序列化
+  # ODS 精简为 11 列：维度提取由 StarRocks DWD 层物化视图完成
+  # TSV 列顺序：event_time | distinct_id | login_id | anonymous_id |
+  #   original_id | event | type | project | properties | event_group | dt
   format_events_tsv:
     type: "remap"
-    inputs: ["sa_process"]
+    inputs: ["post_normalize"]
     source: |
       props_str = if is_object(.properties) { encode_json(object!(.properties)) } else { "" }
-      geoip_str = if is_object(.geoip) { encode_json(object!(.geoip)) } else { "" }
       time_str = if is_timestamp(.time) { format_timestamp!(.time, format: "%Y-%m-%d %H:%M:%S") } else { string(.time) ?? "" }
       .message = join!([
           time_str,
@@ -566,16 +648,8 @@ transforms:
           string(.type) ?? "",
           string(.project) ?? "",
           props_str,
-          string(.properties_keys) ?? "",
-          string(.ua_browser) ?? "",
-          string(.ua_os) ?? "",
-          string(.ua_device) ?? "",
-          geoip_str,
-          string(.redis_meta) ?? "",
-          string(.remote_addr) ?? "",
           string(.event_group) ?? "",
-          string(.dt) ?? "",
-          string(.hour) ?? ""
+          string(.dt) ?? ""
       ], "\t")
 
   # 7. ID Mapping TSV 格式化

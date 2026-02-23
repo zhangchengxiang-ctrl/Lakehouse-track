@@ -12,6 +12,7 @@
 #   download-starrocks-jars  仅下载 StarRocks 外部目录依赖
 #   bench               压力测试（wrk 渐进式 100→5K 并发）
 #   scale-cn            StarRocks CN 弹性伸缩
+#   lifecycle-cleanup   按 event_group 清理过期事件数据
 #   help                显示帮助（默认目标）
 #
 # 示例：
@@ -26,7 +27,7 @@
 ROOT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 LAKEHOUSE_SH := $(ROOT_DIR)scripts/lakehouse.sh
 
-.PHONY: help install fix verify replay reset run-sql download-starrocks-jars bench scale-cn
+.PHONY: help install fix verify replay reset run-sql download-starrocks-jars bench scale-cn lifecycle-cleanup
 
 .DEFAULT_GOAL := help
 
@@ -43,6 +44,7 @@ help:
 	@echo "  download-starrocks-jars  仅下载 StarRocks 外部目录依赖"
 	@echo "  bench                  压力测试（wrk 渐进式 100→10K 并发）"
 	@echo "  scale-cn ARGS=N        StarRocks CN 弹性伸缩到 N 个节点"
+	@echo "  lifecycle-cleanup      清理过期事件（DEBUG>30天, TRACE>180天）"
 	@echo "  help                   显示此帮助（默认）"
 	@echo ""
 	@echo "示例:"
@@ -78,3 +80,9 @@ scale-cn:
 	echo "⚡ Scaling StarRocks CN to $$N nodes..."; \
 	docker compose up -d --scale starrocks-cn=$$N --no-recreate; \
 	echo "✓ Done. Verify: mysql -h 127.0.0.1 -P 9030 -u root -e 'SHOW COMPUTE NODES;'"
+
+lifecycle-cleanup:
+	@echo "🧹 Cleaning expired events (DEBUG>30d, TRACE>180d)..."
+	@docker exec starrocks-fe mysql -h 127.0.0.1 -P 9030 -u root -D ods \
+		-e "DELETE FROM ods_events WHERE (event_group = 'DEBUG' AND dt < DATE_SUB(CURDATE(), INTERVAL 30 DAY)) OR (event_group = 'TRACE' AND dt < DATE_SUB(CURDATE(), INTERVAL 180 DAY));"
+	@echo "✓ Lifecycle cleanup done."

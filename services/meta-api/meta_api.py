@@ -65,11 +65,11 @@ SQL_BATCH_GET_PROJECT_IDS = """
 SELECT id, name FROM track_project WHERE name = ANY($1::text[]) AND status = 1;
 """
 
-# 批量 upsert 事件
+# 批量 upsert 事件（部分唯一索引需匹配 WHERE 条件）
 SQL_BATCH_UPSERT_EVENTS = """
 INSERT INTO track_event_define (project_id, name, accepted, create_time, update_time)
 SELECT unnest($1::int[]), unnest($2::text[]), 1, NOW(), NOW()
-ON CONFLICT (project_id, name) DO NOTHING;
+ON CONFLICT (project_id, name) WHERE project_id IS NOT NULL DO NOTHING;
 """
 
 SQL_BATCH_GET_EVENT_IDS = """
@@ -77,11 +77,11 @@ SELECT id, project_id, name FROM track_event_define
 WHERE (project_id, name) IN (SELECT unnest($1::int[]), unnest($2::text[]));
 """
 
-# 批量 upsert 属性
+# 批量 upsert 属性（部分唯一索引需匹配 WHERE 条件）
 SQL_BATCH_UPSERT_PROPERTIES = """
 INSERT INTO track_property_define (project_id, name, data_type, is_in_use, is_load, create_time, update_time)
 SELECT unnest($1::int[]), unnest($2::text[]), unnest($3::int[]), 1, 1, NOW(), NOW()
-ON CONFLICT (name, project_id) DO NOTHING;
+ON CONFLICT (name, project_id) WHERE project_id IS NOT NULL DO NOTHING;
 """
 
 SQL_BATCH_GET_PROPERTY_IDS = """
@@ -179,6 +179,9 @@ async def register_metadata(request: Request):
                 pass
         elif isinstance(properties_raw, dict):
             props_dict = properties_raw
+
+        if not properties_keys and props_dict:
+            properties_keys = list(props_dict.keys())
 
         for key in properties_keys:
             if not key or not isinstance(key, str):

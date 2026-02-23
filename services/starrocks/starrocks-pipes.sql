@@ -4,12 +4,10 @@
 
 -- ========== events PIPE ==========
 -- Vector 写入路径：s3://lakehouse/track/events/dt={date}/hour={hour}/{uuid}.tsv.gz
--- TSV 列顺序（tab 分隔）：
---   $1  time           $2  distinct_id    $3  login_id       $4  anonymous_id
+-- TSV 列顺序（tab 分隔，11 列）：
+--   $1  event_time     $2  distinct_id    $3  login_id       $4  anonymous_id
 --   $5  original_id    $6  event          $7  type           $8  project
---   $9  properties     $10 properties_keys $11 ua_browser     $12 ua_os
---   $13 ua_device      $14 geoip          $15 redis_meta     $16 remote_addr
---   $17 event_group    $18 dt             $19 hour
+--   $9  properties     $10 event_group    $11 dt
 CREATE PIPE IF NOT EXISTS ods.pipe_s3_events
 PROPERTIES (
     "AUTO_INGEST" = "TRUE",
@@ -18,31 +16,22 @@ PROPERTIES (
     "BATCH_FILES" = "256"
 )
 AS INSERT INTO ods.ods_events (
-    dt, distinct_id, `event`, `time`, login_id, anonymous_id, original_id,
-    `type`, project, properties, properties_keys,
-    ua_browser, ua_os, ua_device, geoip, redis_meta,
-    remote_addr, event_group, `hour`
+    dt, `event`, event_group, project,
+    distinct_id, login_id, anonymous_id, original_id, `type`,
+    event_time, properties
 )
 SELECT
-    CAST($18 AS DATE),         -- dt
-    $2,                         -- distinct_id
+    CAST($11 AS DATE),         -- dt
     $6,                         -- event
-    CAST($1 AS DATETIME),      -- time
+    $10,                        -- event_group
+    $8,                         -- project
+    $2,                         -- distinct_id
     $3,                         -- login_id
     $4,                         -- anonymous_id
     $5,                         -- original_id
     $7,                         -- type
-    $8,                         -- project
-    CAST($9 AS JSON),          -- properties
-    $10,                        -- properties_keys
-    $11,                        -- ua_browser
-    $12,                        -- ua_os
-    $13,                        -- ua_device
-    CAST($14 AS JSON),         -- geoip
-    $15,                        -- redis_meta
-    $16,                        -- remote_addr
-    $17,                        -- event_group
-    $19                         -- hour
+    CAST($1 AS DATETIME),      -- event_time
+    CAST($9 AS JSON)           -- properties
 FROM FILES (
     "path" = "s3://lakehouse/track/events/*/*/*.tsv.gz",
     "format" = "csv",
@@ -53,8 +42,8 @@ FROM FILES (
     "aws.s3.secret_key" = "minioadmin",
     "aws.s3.enable_path_style_access" = "true"
 )
-WHERE $1 != '' AND $18 != ''
-  AND $18 >= '2000-01-01' AND $18 <= '2027-12-31';
+WHERE $1 != '' AND $11 != ''
+  AND $11 >= '2000-01-01' AND $11 <= '2027-12-31';
 
 -- ========== id_mapping PIPE ==========
 -- Vector 写入路径：s3://lakehouse/track/id_mapping/dt={date}/hour={hour}/{uuid}.tsv.gz
