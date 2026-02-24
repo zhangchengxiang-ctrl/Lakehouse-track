@@ -93,6 +93,28 @@ run_starrocks_sql() {
   echo "  执行 starrocks.sql (DDL + Catalog + MV)..."
   _run_mysql < "$f"
 
+  echo "  预建动态分区（今天 ± 3 天）..."
+  _run_mysql -D ods -e "ALTER TABLE ods_events SET ('dynamic_partition.enable' = 'false')" 2>/dev/null || true
+  _run_mysql -D ods -N -e "
+    SELECT CONCAT(
+      'ALTER TABLE ods_events ADD PARTITION IF NOT EXISTS p',
+      DATE_FORMAT(d, '%Y%m%d'),
+      ' VALUES [(''', d, '''), (''', DATE_ADD(d, INTERVAL 1 DAY), '''));'
+    )
+    FROM (
+      SELECT DATE_SUB(CURDATE(), INTERVAL n DAY) AS d
+      FROM (SELECT 0 n UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3) t
+      UNION ALL
+      SELECT DATE_ADD(CURDATE(), INTERVAL n DAY) AS d
+      FROM (SELECT 1 n UNION ALL SELECT 2 UNION ALL SELECT 3) t
+    ) dates
+    ORDER BY d
+  " 2>/dev/null | while read -r stmt; do
+    _run_mysql -D ods -e "$stmt" 2>/dev/null || true
+  done
+  _run_mysql -D ods -e "ALTER TABLE ods_events SET ('dynamic_partition.enable' = 'true')" 2>/dev/null || true
+  echo "  分区创建完成"
+
   echo "  创建 S3 PIPE（需要 S3 路径中有 .tsv.gz 文件）..."
   local pipe_sql="$PROJECT_DIR/services/starrocks/starrocks-pipes.sql"
   if [ -f "$pipe_sql" ]; then
@@ -261,14 +283,14 @@ cmd_verify() {
   echo ""
 
   echo "=== 1. Nginx 日志（最近 3 条 sa 请求）==="
-  grep "/sa" data/nginx_logs/access.log 2>/dev/null | tail -3 || echo "  无"
+  docker compose exec -T collection sh -c 'grep "/sa" /var/log/nginx/access_*.log 2>/dev/null | tail -3' 2>/dev/null || echo "  无"
 
   echo ""
   echo "=== 2. MinIO S3 文件（Vector TSV.gz 输出）==="
   echo "  events:"
-  find data/minio/lakehouse/track/events -name "*.tsv.gz" 2>/dev/null | head -5 || echo "    无"
+  docker compose exec -T minio sh -c 'find /data/lakehouse/track/events -name "*.tsv.gz" 2>/dev/null | head -5' 2>/dev/null || echo "    无"
   echo "  id_mapping:"
-  find data/minio/lakehouse/track/id_mapping -name "*.tsv.gz" 2>/dev/null | head -5 || echo "    无"
+  docker compose exec -T minio sh -c 'find /data/lakehouse/track/id_mapping -name "*.tsv.gz" 2>/dev/null | head -5' 2>/dev/null || echo "    无"
 
   echo ""
   echo "=== 3. StarRocks Pipe 状态 ==="

@@ -183,6 +183,55 @@ spec:
             - name: geoip-data
               mountPath: /etc/vector/geoip
 
+        # ---- MetaAPI sidecar (FastAPI + uvicorn) ----
+        - name: meta-api
+          image: lakehouse-track/collection:latest
+          command: ["uvicorn", "meta_api:app", "--host", "127.0.0.1", "--port", "3000", "--workers", "2", "--log-level", "warning"]
+          workingDir: /app
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          env:
+            - name: PG_HOST
+              value: "postgres"
+            - name: PG_PORT
+              value: "5432"
+            - name: PG_SCHEMA
+              value: "stellar_trace"
+            - name: PG_POOL_MAX
+              value: "20"
+            - name: PG_USER
+              valueFrom:
+                secretKeyRef:
+                  name: lakehouse-secrets
+                  key: PG_USER
+            - name: PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: lakehouse-secrets
+                  key: PG_PASSWORD
+            - name: PG_DB
+              valueFrom:
+                secretKeyRef:
+                  name: lakehouse-secrets
+                  key: PG_DB
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+
         # ---- MetaSync sidecar ----
         - name: meta-sync
           image: postgres:16-alpine

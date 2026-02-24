@@ -249,13 +249,14 @@ PROPERTIES (
     "datacache.enable" = "true"
 );
 
--- ========== 8. 定时任务：刷新 dwd_users ==========
--- 每 10 分钟从 ods_events 聚合用户画像，INSERT OVERWRITE 全量刷新
+-- ========== 8. 定时任务：增量刷新 dwd_users ==========
+-- 每 10 分钟仅处理近 3 天有活动的用户（增量 UPSERT）
+-- PRIMARY KEY 表的 INSERT INTO 自动按主键 UPSERT，无需全量扫描
 -- 直接使用生成列（lib/os/country 等），无需 json_query
 SUBMIT TASK refresh_dwd_users
 SCHEDULE EVERY(INTERVAL 10 MINUTE)
 AS
-INSERT OVERWRITE ods.dwd_users
+INSERT INTO ods.dwd_users
 SELECT
     e.project,
     e.distinct_id,
@@ -281,6 +282,7 @@ SELECT
     ) AS user_properties,
     NOW() AS updated_at
 FROM ods.ods_events e
+WHERE e.dt >= DATE_SUB(CURDATE(), INTERVAL 3 DAY)
 GROUP BY e.project, e.distinct_id;
 
 -- ========== 8.1 事件生命周期清理（外部调度）==========
@@ -332,12 +334,12 @@ WITH (
 );
 
 -- ---- 9.3 查询资源组 ----
--- cpu_weight=8: 在 Shared Cores 中获得最高 CPU 份额
+-- cpu_weight 范围 0-4, 值越大获得的 CPU 份额越高
 -- analyst 用户的 SELECT 自动路由到此资源组
 CREATE RESOURCE GROUP IF NOT EXISTS rg_query
 TO (user='analyst', query_type in ('select'))
 WITH (
-    'cpu_weight' = '8',
+    'cpu_weight' = '4',
     'mem_limit' = '60%',
     'concurrency_limit' = '0',
     'big_query_cpu_second_limit' = '300',

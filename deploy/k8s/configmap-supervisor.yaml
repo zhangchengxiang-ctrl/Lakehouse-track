@@ -20,6 +20,17 @@ data:
     autorestart=true
     priority=10
 
+    [program:meta-api]
+    command=uvicorn meta_api:app --host 127.0.0.1 --port 3000 --workers 2 --log-level warning
+    directory=/app
+    stdout_logfile=/dev/stdout
+    stdout_logfile_maxbytes=0
+    stderr_logfile=/dev/stderr
+    stderr_logfile_maxbytes=0
+    autorestart=true
+    priority=15
+    startsecs=3
+
     [program:vector]
     command=/usr/local/bin/vector --config /etc/vector/vector.yaml
     stdout_logfile=/dev/stdout

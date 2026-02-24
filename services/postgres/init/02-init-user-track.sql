@@ -1,5 +1,10 @@
+-- ============================================================
 -- 埋点元数据表：全部在 schema stellar_trace（默认库 postgres）
 -- 库：postgres（默认）| metastore（仅 Hive，见 03）
+--
+-- ⚠️ 警告：此脚本包含 DROP TABLE，仅由 PostgreSQL initdb 在空数据卷时自动执行。
+-- 切勿对已有数据的环境手动执行，否则会丢失所有业务数据！
+-- ============================================================
 CREATE SCHEMA IF NOT EXISTS stellar_trace;
 SET search_path TO stellar_trace;
 DROP TABLE IF EXISTS track_event_property;

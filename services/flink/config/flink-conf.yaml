@@ -10,12 +10,12 @@ parallelism.default: 1
 
 io.tmp.dirs: /opt/flink/tmp
 
-# S3 / MinIO（Presto + Hadoop 双实现，FileSystem connector 可能用 Hadoop）
+# S3 / MinIO — flink-conf.yaml 不支持 ${ENV_VAR} 替换，此处为 Docker 开发环境默认值。
+# 生产环境需在 K8s ConfigMap 或 Helm values 中覆盖。
 s3.endpoint: http://minio:9000
 s3.access-key: minioadmin
 s3.secret-key: minioadmin
 s3.path.style.access: true
-# Hadoop s3a（FileSystem connector 使用 s3a:// 路径）
 fs.s3a.endpoint: http://minio:9000
 fs.s3a.access.key: minioadmin
 fs.s3a.secret.key: minioadmin

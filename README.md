@@ -41,7 +41,7 @@ graph TD
 | Paimon | 1.3.1 | Hive Metastore 管理元数据，数据存 MinIO |
 | StarRocks | 3.5.12 | 存算分离模式（JDK17+），支持 Paimon External Catalog |
 | PostgreSQL | 16 | 业务元数据 + CDC 源表 |
-| Vector | 0.53+ | 采集端，负责日志解析、GeoIP 增强与 S3 写入 |
+| Vector | 0.53.0 | 采集端，负责日志解析、GeoIP 增强与 S3 写入 |
 | MinIO | latest | 统一对象存储层 |
 
 ---

@@ -15,10 +15,10 @@ fi
 
 export HIVE_CONF_DIR=/opt/hive/conf
 export HADOOP_CLIENT_OPTS=" -Xmx1G \
-  -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://postgres:5432/metastore \
+  -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://${PG_HOST:-postgres}:${PG_PORT:-5432}/${HMS_DB:-metastore} \
   -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver \
-  -Djavax.jdo.option.ConnectionUserName=postgres \
-  -Djavax.jdo.option.ConnectionPassword=postgres"
+  -Djavax.jdo.option.ConnectionUserName=${PG_USER:-postgres} \
+  -Djavax.jdo.option.ConnectionPassword=${PG_PASSWORD:-postgres}"
 
 echo "Initializing HMS schema (idempotent)..."
 if /opt/hive/bin/schematool -dbType postgres -info >/dev/null 2>&1; then

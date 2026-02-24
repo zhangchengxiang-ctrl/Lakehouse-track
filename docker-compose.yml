@@ -44,7 +44,7 @@ services:
       - lakehouse-net
 
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: server /data --console-address ":9001"
     mem_limit: 512m
     env_file: .env
@@ -56,6 +56,12 @@ services:
       - "9001:9001"
     volumes:
       - ./data/minio:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     networks:
       - lakehouse-net
 
@@ -64,7 +70,7 @@ services:
     env_file: .env
     depends_on:
       minio:
-        condition: service_started
+        condition: service_healthy
     entrypoint: >
       /bin/sh -c "
       for i in $$(seq 1 30); do
@@ -98,7 +104,7 @@ services:
       # 注：使用 anonymous volumes 让每个 collection 实例拥有独立的 buffer
       # 容器 restart 不丢数据，recreate/rebuild 会重置（生产用 K8s PVC 持久化）
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost/health || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost/health && curl -sf http://localhost:3000/health"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -107,7 +113,7 @@ services:
       postgres:
         condition: service_healthy
       minio:
-        condition: service_started
+        condition: service_healthy
     restart: on-failure
     networks:
       - lakehouse-net
@@ -137,9 +143,9 @@ services:
       postgres:
         condition: service_healthy
       minio:
-        condition: service_started
+        condition: service_healthy
       hive-metastore:
-        condition: service_started
+        condition: service_healthy
     networks:
       - lakehouse-net
 
@@ -157,6 +163,12 @@ services:
       AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-minioadmin}
       ENABLE_S3_PATH_STYLE_ACCESS: "true"
       FLINK_PROPERTIES: "jobmanager.rpc.address: flink-jobmanager"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/v1/taskmanagers || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
     depends_on:
       - flink-jobmanager
     networks:
@@ -170,6 +182,12 @@ services:
     env_file: .env
     entrypoint: ["/bin/sh", "-c"]
     command: "/opt/hive/bin/hms-entrypoint.sh"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/9083' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
     depends_on:
       postgres:
         condition: service_healthy
@@ -239,7 +257,7 @@ services:
       start_period: 120s
     depends_on:
       minio:
-        condition: service_started
+        condition: service_healthy
     networks:
       - lakehouse-net
 
@@ -293,7 +311,7 @@ services:
       starrocks-fe:
         condition: service_healthy
       minio:
-        condition: service_started
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "mysql -uroot -hstarrocks-fe -P9030 -e 'SHOW COMPUTE NODES' | grep $$(hostname -f) | grep -q true"]
       interval: 15s

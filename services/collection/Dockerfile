@@ -15,16 +15,12 @@ FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    nginx \
-    postgresql-client \
-    supervisor \
-    logrotate \
-    curl \
-    cron \
-    ca-certificates \
-    procps \
-    python3-pip \
+RUN for i in 1 2 3; do \
+      apt-get update && apt-get install -y --no-install-recommends \
+        nginx postgresql-client supervisor logrotate curl cron \
+        ca-certificates procps python3-pip \
+      && break || { echo "Retry $i..."; sleep 5; }; \
+    done \
     && pip install --no-cache-dir --break-system-packages \
        fastapi==0.115.6 uvicorn==0.34.0 asyncpg==0.30.0 \
     && rm -rf /var/lib/apt/lists/*
