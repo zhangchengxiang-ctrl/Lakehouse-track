@@ -28,13 +28,24 @@ spec:
                 echo "Waiting for StarRocks FE..."
                 sleep 5
               done
-              HOSTNAME=$(hostname)
-              mysql -h starrocks-fe -P9030 -uroot -e "SHOW COMPUTE NODES" | grep -q "$HOSTNAME" || \
-              mysql -h starrocks-fe -P9030 -uroot -e "ALTER SYSTEM ADD COMPUTE NODE \"$HOSTNAME.starrocks-cn.lakehouse-track.svc.cluster.local:9050\";"
-              echo "CN node $HOSTNAME registered"
+              # init 阶段 headless DNS 可能尚不可用，用 Pod IP 注册
+              echo "Registering CN at ${POD_IP}:9050"
+              mysql -h starrocks-fe -P9030 -uroot -e "SHOW COMPUTE NODES" | grep -q "${POD_IP}" || \
+              mysql -h starrocks-fe -P9030 -uroot -e "ALTER SYSTEM ADD COMPUTE NODE \"${POD_IP}:9050\";"
+              echo "CN node ${POD_IP}:9050 registered"
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
       containers:
         - name: cn
           image: starrocks/cn-ubuntu:3.5.12
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              exec /opt/starrocks/cn/bin/start_cn.sh
           ports:
             - containerPort: 8040
               name: http

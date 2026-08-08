@@ -13,6 +13,9 @@
 #   bench               压力测试（wrk 渐进式 100→5K 并发）
 #   scale-cn            StarRocks CN 弹性伸缩
 #   lifecycle-cleanup   按 event_group 清理过期事件数据
+#   sqlmesh-install     安装本仓 SQLMesh venv（不合并 platform）
+#   sqlmesh-info        SQLMesh 连通性检查
+#   sqlmesh-ui          启动 SQLMesh Web UI（:8082）
 #   help                显示帮助（默认目标）
 #
 # 示例：
@@ -21,13 +24,15 @@
 #   make run-sql ARGS=flink
 #   make bench
 #   make scale-cn ARGS=4
+#   make sqlmesh-install && make sqlmesh-info
 # ============================================================
 
 # 项目根目录与脚本路径（与 Makefile 同目录）
 ROOT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 LAKEHOUSE_SH := $(ROOT_DIR)scripts/lakehouse.sh
+SQLMESH_SH := $(ROOT_DIR)scripts/sqlmesh.sh
 
-.PHONY: help install fix verify replay reset run-sql download-starrocks-jars bench scale-cn lifecycle-cleanup
+.PHONY: help install fix verify replay reset run-sql download-starrocks-jars bench scale-cn lifecycle-cleanup sqlmesh-install sqlmesh-info sqlmesh-ui sqlmesh
 
 .DEFAULT_GOAL := help
 
@@ -45,11 +50,16 @@ help:
 	@echo "  bench                  压力测试（wrk 渐进式 100→10K 并发）"
 	@echo "  scale-cn ARGS=N        StarRocks CN 弹性伸缩到 N 个节点"
 	@echo "  lifecycle-cleanup      清理过期事件（DEBUG>30天, TRACE>180天）"
+	@echo "  sqlmesh-install        安装本仓 SQLMesh（.venv-sqlmesh）"
+	@echo "  sqlmesh-info           SQLMesh info（连 StarRocks）"
+	@echo "  sqlmesh-ui             SQLMesh Web UI（默认 :8082）"
+	@echo "  sqlmesh ARGS=...       透传 sqlmesh 子命令（在 projects/warehouse）"
 	@echo "  help                   显示此帮助（默认）"
 	@echo ""
 	@echo "示例:"
 	@echo "  make install"
 	@echo "  make run-sql ARGS=flink"
+	@echo "  make sqlmesh-install && make sqlmesh-info"
 
 install:
 	@$(LAKEHOUSE_SH) install
@@ -74,6 +84,22 @@ download-starrocks-jars:
 
 bench:
 	@$(ROOT_DIR)scripts/bench.sh $(ARGS)
+
+sqlmesh-install:
+	@chmod +x $(SQLMESH_SH)
+	@$(SQLMESH_SH) install
+
+sqlmesh-info:
+	@chmod +x $(SQLMESH_SH)
+	@$(SQLMESH_SH) info
+
+sqlmesh-ui:
+	@chmod +x $(SQLMESH_SH)
+	@$(SQLMESH_SH) ui
+
+sqlmesh:
+	@chmod +x $(SQLMESH_SH)
+	@$(SQLMESH_SH) $(ARGS)
 
 scale-cn:
 	@N=$(or $(ARGS),2); \

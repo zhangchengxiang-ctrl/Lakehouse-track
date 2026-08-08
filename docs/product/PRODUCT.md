@@ -12,7 +12,7 @@
 ## 反参考
 
 - 不要像什么：AI 问答助手、插件宿主、运营后台
-- 明确不做：对话 UI、知识卡片、agent-kit、对账门 / AI 质量门（本期）
+- 明确不做：对话 UI、知识卡片、agent-kit、对账门 / AI 质量门（本期）；默认不上 Kafka；不换采集解析语言（ADR-7/8）
 
 ## 表面默认
 
@@ -26,4 +26,5 @@
 ## 备注
 
 - 运行时真源：根 `README.md` + `services/`
-- 设计草稿：`docs/architecture/完整方案-可落地版.md`（可能落后于代码）
+- 架构设计真源（目标态 / HA·性能·成本 / 演进）：`docs/architecture/完整方案-可落地版.md`
+- 差距账：`docs/product/gap-register.md`

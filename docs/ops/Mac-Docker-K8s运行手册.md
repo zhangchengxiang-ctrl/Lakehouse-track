@@ -22,6 +22,13 @@ make run-sql
 make verify
 ```
 
+**StarRocks 二选一（同抢 9030，勿同时起）：**
+
+| 模式 | 命令 | 说明 |
+|------|------|------|
+| 存算分离 FE+CN | `docker compose up -d starrocks-fe starrocks-cn` | 本仓 Lakehouse 目标态 |
+| all-in-one（已收编） | `docker compose --profile allin1 up -d starrocks` | 容器名 `flowgpt-starrocks`，数据卷沿用 flowgpt；DataSage/SQLMesh 共用 |
+
 常用：
 
 | 目标 | 作用 |
@@ -43,19 +50,50 @@ make verify
 
 ## 三、K8s 实验室
 
+### 本机 kind（推荐）
+
+工具（已可装到 `~/.local/bin`）：`kubectl`、`kind`。
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+
+# 建集群
+kind create cluster --config deploy/k8s/kind-config.yaml
+
+# 构建 collection 并导入
+docker build -t lakehouse-track/collection:latest -f services/collection/Dockerfile .
+kind load docker-image lakehouse-track/collection:latest --name lakehouse
+
+# 先把 StarRocks 镜像拉到宿主机再导入（kind 内直拉 Docker Hub 常很慢）
+docker pull starrocks/fe-ubuntu:3.5.12
+docker pull starrocks/cn-ubuntu:3.5.12
+kind load docker-image starrocks/fe-ubuntu:3.5.12 --name lakehouse
+kind load docker-image starrocks/cn-ubuntu:3.5.12 --name lakehouse
+
+# 实验室 overlay（CN×1 / MinIO×1 / shared_data ConfigMap / 小 PVC）
+kubectl apply -k deploy/k8s/overlays/lab
+kubectl -n lakehouse-track get pods -w
+```
+
+宿主机端口映射（见 `deploy/k8s/kind-config.yaml`）：
+
+| 服务 | 宿主机 |
+|------|--------|
+| StarRocks MySQL | `127.0.0.1:9030` |
+| Collection HTTP | `127.0.0.1:18080` |
+| MinIO API / Console | `127.0.0.1:19000` / `19001` |
+
+说明见 [`deploy/k8s/overlays/lab/README.md`](../deploy/k8s/overlays/lab/README.md)。
+
+### 通用 apply（非 lab）
+
 ```bash
 make install
-kubectl apply -k deploy/k8s
+kubectl apply -k deploy/k8s/base   # 生产规格；本机内存/磁盘不够勿直接用
 kubectl get pods -n lakehouse-track -w
 ```
 
-命名空间：`lakehouse-track`。清单在 `deploy/k8s/`（collection Deployment/HPA、Postgres/MinIO StatefulSet、StarRocks FE/CN、ConfigMap/Secret）。
-
-清理：
-
-```bash
-kubectl delete namespace lakehouse-track
-```
+命名空间：`lakehouse-track`。清理：`kind delete cluster --name lakehouse` 或 `kubectl delete namespace lakehouse-track`。
 
 ---
 

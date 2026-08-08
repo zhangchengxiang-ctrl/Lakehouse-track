@@ -1,0 +1,51 @@
+# Expose lab NodePorts matching kind-config extraPortMappings
+apiVersion: v1
+kind: Service
+metadata:
+  name: starrocks-fe
+  namespace: lakehouse-track
+spec:
+  type: NodePort
+  ports:
+    - name: http
+      port: 8030
+      targetPort: 8030
+      nodePort: 30830
+    - name: rpc
+      port: 9020
+      targetPort: 9020
+      nodePort: 30920
+    - name: mysql
+      port: 9030
+      targetPort: 9030
+      nodePort: 30903
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: collection
+  namespace: lakehouse-track
+spec:
+  type: NodePort
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      nodePort: 30080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: lakehouse-track
+spec:
+  type: NodePort
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+      nodePort: 30900
+    - name: console
+      port: 9001
+      targetPort: 9001
+      nodePort: 30901

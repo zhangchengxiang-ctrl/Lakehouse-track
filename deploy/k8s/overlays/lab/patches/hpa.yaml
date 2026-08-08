@@ -1,0 +1,8 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: collection-hpa
+  namespace: lakehouse-track
+spec:
+  minReplicas: 1
+  maxReplicas: 2

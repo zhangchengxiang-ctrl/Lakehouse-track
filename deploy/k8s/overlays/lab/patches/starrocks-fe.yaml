@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: starrocks-fe
+  namespace: lakehouse-track
+spec:
+  template:
+    spec:
+      containers:
+        - name: fe
+          image: starrocks/fe-ubuntu:3.5.12
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              if ! grep -q "BEGIN LAKEHOUSE_TRACK_SHARED_CONF" /opt/starrocks/fe/conf/fe.conf 2>/dev/null; then
+                {
+                  echo ""
+                  echo "# BEGIN LAKEHOUSE_TRACK_SHARED_CONF"
+                  cat /etc/starrocks/fe-shared.conf
+                  echo "# END LAKEHOUSE_TRACK_SHARED_CONF"
+                } >> /opt/starrocks/fe/conf/fe.conf
+              fi
+              exec /opt/starrocks/fe/bin/start_fe.sh
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: fe-meta
+              mountPath: /opt/starrocks/fe/meta
+            - name: fe-shared
+              mountPath: /etc/starrocks/fe-shared.conf
+              subPath: fe-shared.conf
+      volumes:
+        - name: fe-shared
+          configMap:
+            name: starrocks-fe-shared
+  volumeClaimTemplates:
+    - metadata:
+        name: fe-meta
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi

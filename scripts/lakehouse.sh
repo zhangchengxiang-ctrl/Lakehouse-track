@@ -35,10 +35,13 @@ STAR_PASS="${STARROCKS_PASS:-}"
 _run_mysql() {
   if docker compose ps starrocks-fe 2>/dev/null | grep -q "Up"; then
     docker compose exec -T starrocks-fe mysql -h 127.0.0.1 -P 9030 -u root "$@"
+  elif docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'flowgpt-starrocks'; then
+    # allin1（profile allin1，从 flowgpt-data-platform 收编）
+    docker exec -i flowgpt-starrocks mysql -h 127.0.0.1 -P 9030 -u root "$@"
   elif command -v mysql &>/dev/null; then
     mysql -h "$STAR_HOST" -P "$STAR_PORT" -u "$STAR_USER" ${STAR_PASS:+-p"$STAR_PASS"} "$@"
   else
-    echo "需要 mysql 客户端或运行中的 starrocks-fe 容器"
+    echo "需要 mysql 客户端，或运行中的 starrocks-fe / flowgpt-starrocks 容器"
     exit 1
   fi
 }

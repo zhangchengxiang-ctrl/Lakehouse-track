@@ -63,7 +63,7 @@ mysql -h 127.0.0.1 -P 9030 -u root
 
 ## 架构与写入边界
 
-> 运行时真源：根 `README.md` + `services/` + `docker-compose.yml`。设计草稿：`docs/architecture/完整方案-可落地版.md`（可能落后于代码）。运维：`docs/ops/`、`Makefile`。
+> 运行时真源：根 `README.md` + `services/` + `docker-compose.yml`。架构目标态：`docs/architecture/完整方案-可落地版.md`（实现细节与代码冲突时以代码为准）。运维：`docs/ops/`、`Makefile`。
 
 - 进程 / 部署单元：collection（Nginx+Vector+MetaAPI+MetaSync）、Flink JM/TM、PostgreSQL、Hive Metastore、MinIO、StarRocks FE/CN
 - 分层或目录约定：`services/*` → `deploy/k8s` → `scripts/` → `docs/{product,specs,architecture,ops}`

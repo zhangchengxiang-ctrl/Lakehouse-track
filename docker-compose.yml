@@ -323,6 +323,80 @@ services:
     networks:
       - lakehouse-net
 
+  # ==================== 可选：all-in-one StarRocks（从 flowgpt-data-platform 收编）====================
+  # 与上方 starrocks-fe / starrocks-cn 互斥（同抢 9030/8030/8040）。
+  # 保留原容器名与数据卷，DataSage / SQLMesh 仍连 127.0.0.1:9030。
+  # 启动：docker compose --profile allin1 up -d starrocks
+  # 切回存算分离：docker compose --profile allin1 stop starrocks && docker compose up -d starrocks-fe starrocks-cn
+  starrocks:
+    profiles: ["allin1"]
+    image: ${STARROCKS_IMAGE:-starrocks/allin1-ubuntu:latest}
+    container_name: flowgpt-starrocks
+    restart: unless-stopped
+    mem_limit: 12g
+    ports:
+      - "${STARROCKS_MYSQL_PORT:-9030}:9030"
+      - "${STARROCKS_FE_HTTP_PORT:-8030}:8030"
+      - "${STARROCKS_BE_HTTP_PORT:-8040}:8040"
+      - "${STARROCKS_FE_PROXY_PORT:-18081}:8080"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    volumes:
+      - starrocks_allin1_data:/data/deploy/starrocks
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysql -h 127.0.0.1 -P 9030 -u root -e 'SHOW BACKENDS\\G' | grep 'Alive: true'",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    networks:
+      - lakehouse-net
+
+  # ==================== 可选：SQLMesh UI（本仓独立安装，不合并 platform）====================
+  # 启动：docker compose --profile sqlmesh up -d --build sqlmesh
+  # UI：http://127.0.0.1:8082
+  # 依赖：同网络内可解析的 StarRocks（默认 flowgpt-starrocks:9030）
+  sqlmesh:
+    profiles: ["sqlmesh"]
+    build:
+      context: ./services/sqlmesh
+      dockerfile: Dockerfile
+      args:
+        SQLMESH_VERSION: ${SQLMESH_VERSION:-0.236.1}
+    container_name: lakehouse-sqlmesh
+    mem_limit: 1g
+    working_dir: /project
+    environment:
+      STARROCKS_HOST: ${SQLMESH_STARROCKS_HOST:-flowgpt-starrocks}
+      STARROCKS_PORT: ${STARROCKS_PORT:-9030}
+      STARROCKS_USER: ${STARROCKS_USER:-root}
+      STARROCKS_PASSWORD: ${STARROCKS_PASSWORD:-}
+      STARROCKS_DATABASE: ${STARROCKS_DATABASE:-ods}
+      STARROCKS_CONCURRENT_TASKS: ${STARROCKS_CONCURRENT_TASKS:-2}
+      STARROCKS_REPLICATION_NUM: ${STARROCKS_REPLICATION_NUM:-1}
+      SQLMESH_STATE_DB: /data/sqlmesh_state.db
+      SQLMESH_UI_PORT: "8080"
+    ports:
+      - "${SQLMESH_UI_PORT:-8082}:8080"
+    volumes:
+      - ./projects/warehouse:/project
+      - ./data/sqlmesh:/data
+    restart: unless-stopped
+    networks:
+      - lakehouse-net
+
+volumes:
+  # 沿用 flowgpt-data-platform 已有卷，避免迁仓丢数
+  starrocks_allin1_data:
+    external: true
+    name: flowgpt-data-platform_starrocks_data
+
 networks:
   lakehouse-net:
     name: lakehouse-net

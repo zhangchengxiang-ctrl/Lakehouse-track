@@ -1,0 +1,27 @@
+# Lakehouse-track 本地 SQLMesh 项目（独立安装，不依赖 flowgpt-data-platform 合并）
+# 引擎：本机 StarRocks（allin1 容器名 flowgpt-starrocks，或 FE 宿主机 9030）
+# 状态库：DuckDB 文件（单用户实验室；生产可改 Postgres state_connection）
+
+gateways:
+  local:
+    connection:
+      type: starrocks
+      host: "{{ env_var('STARROCKS_HOST', '127.0.0.1') }}"
+      port: {{ env_var('STARROCKS_PORT', '9030') }}
+      user: "{{ env_var('STARROCKS_USER', 'root') }}"
+      password: "{{ env_var('STARROCKS_PASSWORD', '') }}"
+      database: "{{ env_var('STARROCKS_DATABASE', 'ods') }}"
+      concurrent_tasks: {{ env_var('STARROCKS_CONCURRENT_TASKS', '2') }}
+    state_connection:
+      type: duckdb
+      database: "{{ env_var('SQLMESH_STATE_DB', 'data/sqlmesh_state.db') }}"
+
+default_gateway: local
+
+model_defaults:
+  dialect: starrocks
+  start: 2026-01-01
+  cron: "@daily"
+
+variables:
+  starrocks_replication_num: "{{ env_var('STARROCKS_REPLICATION_NUM', '1') }}"

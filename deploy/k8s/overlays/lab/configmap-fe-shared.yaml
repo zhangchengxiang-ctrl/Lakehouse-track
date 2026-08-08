@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: starrocks-fe-shared
+  namespace: lakehouse-track
+data:
+  fe-shared.conf: |
+    # Lab shared_data（MinIO in-cluster）
+    run_mode = shared_data
+    cloud_native_storage_type = S3
+    aws_s3_endpoint = minio.lakehouse-track.svc.cluster.local:9000
+    aws_s3_path = lakehouse
+    aws_s3_access_key = minioadmin
+    aws_s3_secret_key = minioadmin
+    aws_s3_use_instance_profile = false
+    aws_s3_use_aws_sdk_default_behavior = false
+    enable_load_volume_from_conf = true
+    query_port = 9030
+    enable_shared_data_mode_warmup = true
+    enable_materialized_view_rewrite = true
+    enable_shared_data_mode_metadata_cleanup = true
+    enable_stats_auto_collect = true
+    metadata_cache_memory_limit_percent = 20
+    slow_query_log_threshold_ms = 1000
+    enable_query_tablet_affinity = true

@@ -1,0 +1,187 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: lakehouse-track
+data:
+  nginx.conf: |
+    user root;
+    worker_processes auto;
+    worker_rlimit_nofile 65535;
+    worker_shutdown_timeout 10s;
+    
+    error_log /var/log/nginx/error.log warn;
+    pid /var/run/nginx.pid;
+    
+    events {
+        use epoll;
+        worker_connections 16384;
+        multi_accept on;
+        accept_mutex off;
+    }
+    
+    http {
+        include /etc/nginx/mime.types;
+        default_type application/octet-stream;
+    
+        map $http_x_forwarded_for  $clientRealIp {
+            ""    $remote_addr;
+            ~^(?P<firstAddr>[0-9\.]+),?.*$    $firstAddr;
+        }
+    
+        log_format main '$clientRealIp - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" "$http_x_forwarded_for" "$request_body" "$upstream_addr"';
+        log_format log_extractor '"$proxy_add_x_forwarded_for" ++_ "$msec" ++_ "$request_method" ++_ "$arg_gzip" ++_ "$arg_data" ++_ "$arg_data_list" ++_ "$request_body" ++_ "$http_user_agent" ++_ "$arg_project" ++_ "$http_cookie" ++_ "$arg_token" ++_ "$arg_ext"';
+    
+        access_log off;
+    
+        sendfile on;
+        tcp_nopush on;
+        tcp_nodelay on;
+        keepalive_timeout 30;
+        keepalive_requests 100000;
+        client_body_timeout 10;
+        send_timeout 10;
+        reset_timedout_connection on;
+        types_hash_max_size 2048;
+        server_tokens off;
+    
+        open_file_cache max=2000 inactive=30s;
+        open_file_cache_valid 60s;
+        open_file_cache_min_uses 2;
+    
+        # access_log 使用变量路径（按小时切分），缓存文件描述符避免频繁 open/close
+        open_log_file_cache max=16 inactive=60s valid=60s min_uses=2;
+    
+        gzip on;
+        gzip_types text/plain text/css application/json application/javascript application/octet-stream;
+    
+        upstream internal_sink {
+            server 127.0.0.1:81;
+            keepalive 512;
+            keepalive_requests 100000;
+        }
+    
+        server {
+            listen 127.0.0.1:81;
+            access_log off;
+            location / { return 204; }
+        }
+    
+        server {
+            listen 80 backlog=4096 reuseport deferred;
+            server_name localhost;
+    
+            client_body_buffer_size 64k;
+            client_max_body_size 2m;
+            client_body_in_single_buffer on;
+    
+            if ($time_iso8601 ~ "^(\d{4})-(\d{2})-(\d{2})T(\d{2})") {
+                set $year $1;
+                set $month $2;
+                set $day $3;
+                set $hour $4;
+            }
+    
+            location /health {
+                access_log off;
+                return 200 "healthy\n";
+                add_header Content-Type text/plain;
+            }
+    
+            location /sa.gif {
+                add_header 'Access-Control-Allow-Origin' '*';
+                if ($request_method = 'OPTIONS') {
+                    access_log off;
+                    return 204;
+                }
+                add_header Cache-Control 'no-cache, no-store, must-revalidate';
+                add_header Pragma 'no-cache';
+                add_header Expires 'Mon, 28 Sep 1970 05:00:00 GMT';
+    
+                # GET 请求无需 proxy_pass，直接返回
+                if ($request_method = GET) {
+                    access_log /var/log/nginx/access_${year}${month}${day}${hour}.log log_extractor;
+                    return 200;
+                }
+    
+                # POST 请求需要 proxy_pass 触发 body 读取
+                access_log /var/log/nginx/access_${year}${month}${day}${hour}.log log_extractor;
+                proxy_pass http://internal_sink;
+                proxy_http_version 1.1;
+                proxy_set_header Connection "";
+                proxy_set_header Host $host;
+                proxy_buffering off;
+                proxy_request_buffering off;
+                proxy_ignore_client_abort on;
+            }
+    
+            location = /sa {
+                add_header Cache-Control 'no-cache, no-store, must-revalidate';
+    
+                # GET 直返
+                if ($request_method = GET) {
+                    access_log /var/log/nginx/access_${year}${month}${day}${hour}.log log_extractor;
+                    return 200;
+                }
+    
+                # POST 经 proxy_pass 读 body
+                access_log /var/log/nginx/access_${year}${month}${day}${hour}.log log_extractor;
+                proxy_pass http://internal_sink;
+                proxy_http_version 1.1;
+                proxy_set_header Connection "";
+                proxy_set_header Host $host;
+                proxy_buffering off;
+                proxy_request_buffering off;
+                proxy_ignore_client_abort on;
+            }
+    
+            # SDK 配置相关
+            location ~ ^/config/(iOS|Android)\.conf$ {
+                access_log off;
+                alias /etc/nginx/sdk_debug;
+                if ($arg_app_id = "") {
+                    rewrite /config/(iOS|Android) /config/$1 last;
+                }
+                if (!-d "$request_filename/sdk_config") {
+                    rewrite /config/(iOS|Android) /config/$1 last;
+                }
+                set $sdk_config_project "default";
+                if ($arg_project != "") {
+                    set $sdk_config_project $arg_project;
+                }
+                set $sdk_config_path "sdk_config/$sdk_config_project/$1/$arg_app_id";
+                if ( !-d "$request_filename/$sdk_config_path" ) {
+                    return 205;
+                }
+                if ( -f "$request_filename/$sdk_config_path/$1_${arg_v}_nv$arg_nv" ) {
+                    return 304;
+                }
+                rewrite /config/(iOS|Android) /$sdk_config_path/$1 last;
+            }
+    
+            location ~ ^/sdk_config {
+                access_log off;
+                default_type application/json;
+                root /etc/nginx/sdk_debug;
+            }
+    
+            location = /config/ {
+                access_log off;
+                return 200;
+            }
+    
+            location /config {
+                access_log off;
+                alias /etc/nginx/sdk_debug;
+                default_type application/json;
+                if ( -f "${request_filename}_${arg_v}") {
+                    return 304;
+                }
+            }
+    
+            location = /robots.txt {
+                return 200 "User-agent: *\nDisallow: /";
+                access_log off;
+            }
+        }
+    }

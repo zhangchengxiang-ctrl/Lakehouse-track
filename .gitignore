@@ -17,6 +17,14 @@ services/collection/config/geoip/*.mmdb
 __pycache__/
 *.pyc
 *.pyo
+.venv-sqlmesh/
+projects/warehouse/.env
+
+# ========== SQLMesh state ==========
+data/sqlmesh/
+**/sqlmesh_state.db
+**/sqlmesh_state.db.*
+projects/warehouse/.cache/
 
 # ========== 运行时生成与临时文件 ==========
 services/flink/dist/

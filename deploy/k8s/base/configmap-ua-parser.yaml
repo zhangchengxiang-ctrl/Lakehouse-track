@@ -1,0 +1,220 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ua-parser-vrl
+  namespace: lakehouse-track
+data:
+  ua_parser.vrl: |
+    # ============================================================
+    # UA Parser — Multi-step regex extraction
+    # Architecture:
+    #   Step 1  Bot detection (pre-filter)
+    #   Step 2  OS + version
+    #   Step 3A Browser detection (when SDK didn't set $browser)
+    #   Step 3B Browser version supplement (SDK set name, no version)
+    #   Step 4  Device type
+    # ============================================================
+    
+    if exists(.http_user_agent) && .http_user_agent != "-" {
+      ua = string!(.http_user_agent)
+      if !exists(.properties."$user_agent") { .properties."$user_agent" = ua }
+    
+      if !starts_with(ua, "SensorsAnalytics") {
+        ua_lc = downcase(ua)
+    
+        # ==========================================================
+        # Step 1 — Bot Detection
+        # ==========================================================
+        is_bot = false
+        if match(ua_lc, r'bot|crawl|spider|slurp|archiv|curl/|wget/|python|java/\d|go-http|node-fetch|axios/|http[_s]?client|lighthouse|phantom|selenium') {
+          bot_name = "bot"
+          m, e = parse_regex(ua, r'(?P<n>Googlebot|bingbot|YandexBot|Baiduspider|DuckDuckBot|PetalBot|AhrefsBot|SemrushBot|MJ12bot|DotBot|Sogou\S+spider|360Spider)')
+          if e == null { bot_name = string!(m.n); is_bot = true }
+          if !is_bot { m, e = parse_regex(ua_lc, r'(?P<n>facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slackbot|discordbot)'); if e == null { bot_name = string!(m.n); is_bot = true } }
+          if !is_bot && match(ua_lc, r'python-|go-http|java/\d|node-fetch|curl/|wget/|axios/|http[_s]?client') { bot_name = "http_client"; is_bot = true }
+          if !is_bot { is_bot = true }
+          .properties."$bot_name" = bot_name
+          .properties."$bot_category" = "bot"
+        }
+    
+        if !is_bot {
+          # ==========================================================
+          # Step 2 — OS Detection + Version
+          # ==========================================================
+          os_set = exists(.properties."$os")
+          osv_set = exists(.properties."$os_version")
+    
+          if !os_set || !osv_set {
+            # --- HarmonyOS (before Android; its UA also contains "Android") ---
+            if !os_set && match(ua, r'HarmonyOS') {
+              .properties."$os" = "HarmonyOS"; os_set = true
+            }
+    
+            # --- iOS / iPadOS ---
+            if !os_set {
+              m, e = parse_regex(ua, r'(?:CPU (?:iPhone )?OS|iPhone OS) (?P<ver>\d+[_\d.]+)')
+              if e == null {
+                .properties."$os" = "iOS"; os_set = true
+                if !osv_set { .properties."$os_version" = replace(string!(m.ver), "_", "."); osv_set = true }
+              }
+            }
+    
+            # --- Android ---
+            if !os_set {
+              m, e = parse_regex(ua, r'Android[/ ](?P<ver>\d+[.\d]*)')
+              if e == null {
+                .properties."$os" = "Android"; os_set = true
+                if !osv_set { .properties."$os_version" = string!(m.ver); osv_set = true }
+              }
+            }
+            if !os_set && match(ua, r'Android') && !match(ua, r'Android\.|like Android') {
+              .properties."$os" = "Android"; os_set = true
+            }
+    
+            # --- Windows ---
+            if !os_set {
+              m, e = parse_regex(ua, r'Windows NT (?P<ver>\d+\.\d+)')
+              if e == null {
+                .properties."$os" = "Windows"; os_set = true
+                if !osv_set {
+                  v = string!(m.ver)
+                  if v == "5.0" { .properties."$os_version" = "2000" }
+                  if v == "5.1" || v == "5.2" { .properties."$os_version" = "XP" }
+                  if v == "6.0" { .properties."$os_version" = "Vista" }
+                  if v == "6.1" { .properties."$os_version" = "7" }
+                  if v == "6.2" { .properties."$os_version" = "8" }
+                  if v == "6.3" { .properties."$os_version" = "8.1" }
+                  if v == "10.0" { .properties."$os_version" = "10" }
+                  osv_set = true
+                }
+              }
+            }
+            if !os_set && match(ua, r'Windows') { .properties."$os" = "Windows"; os_set = true }
+    
+            # --- macOS ---
+            if !os_set {
+              m, e = parse_regex(ua, r'Mac OS X (?P<ver>\d+[_.\d]+)')
+              if e == null {
+                .properties."$os" = "macOS"; os_set = true
+                if !osv_set { .properties."$os_version" = replace(string!(m.ver), "_", "."); osv_set = true }
+              }
+            }
+            if !os_set && match(ua, r'Macintosh') { .properties."$os" = "macOS"; os_set = true }
+    
+            # --- Chrome OS ---
+            if !os_set && match(ua, r'CrOS') { .properties."$os" = "Chrome OS"; os_set = true }
+    
+            # --- Linux (but not Android/CrOS) ---
+            if !os_set && match(ua, r'Linux') && !match(ua, r'Android') { .properties."$os" = "Linux"; os_set = true }
+          }
+    
+          # ==========================================================
+          # Step 3A — Browser Detection (SDK didn't set $browser)
+          # ==========================================================
+          # Rule: most specific first → generic last.
+          # Each rule sets BOTH name and version in one shot.
+          if !exists(.properties."$browser") {
+            br = false
+    
+            # ── Chinese app-embedded browsers ──
+            if !br { m, e = parse_regex(ua, r'wxwork/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "WeChat Work"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'MicroMessenger/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "WeChat"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'DingTalk/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "DingTalk"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'QQBrowserLite/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "QQ Browser Lite"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'(?:MQQBrowser|QQBrowser)/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "QQ Browser"; .properties."$browser_version" = string!(m.ver); br = true } }
+    
+            # ── Chinese vendor browsers ──
+            if !br { m, e = parse_regex(ua, r'SogouMobileBrowser/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "Sogou Mobile"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'SE (?P<ver>\d+[.\d]*)'); if e == null && match(ua, r'MetaSr') { .properties."$browser" = "Sogou Explorer"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'SLBrowser/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "Smart Lenovo Browser"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'bdhonorbrowser/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "HONOR Browser"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'HeyTapBrowser/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "HeyTapBrowser"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'(?:MIUIBrowser|MiuiBrowser)/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "Mi Browser"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'HuaweiBrowser/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "Huawei Browser"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'VivoBrowser/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "vivo Browser"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'UCBrowser/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "UC Browser"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'SamsungBrowser/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "Samsung Browser"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'QuarkPC/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "Quark"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'Quark/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "Quark"; .properties."$browser_version" = string!(m.ver); br = true } }
+    
+            # ── Chromium forks ──
+            if !br { m, e = parse_regex(ua, r'Edg(?:e|A|iOS)?/(?P<ver>\d+[.\d]+)'); if e == null && !match(ua, r'motorola Edge|Sparx Edge|; Edge') { .properties."$browser" = "Microsoft Edge"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'OPR/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "Opera"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'HeadlessChrome/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "Headless Chrome"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'CriOS/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "Chrome Mobile iOS"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'FxiOS/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "Firefox iOS"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'QtWebEngine/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "QtWebEngine"; .properties."$browser_version" = string!(m.ver); br = true } }
+    
+            # ── Firefox ──
+            if !br { m, e = parse_regex(ua, r'Firefox/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "Firefox"; .properties."$browser_version" = string!(m.ver); br = true } }
+    
+            # ── Chrome / Safari (generic — MUST be after all specific browsers) ──
+            if !br { m, e = parse_regex(ua, r'(?:; wv\)|Version/).+Chrome/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "Chrome Webview"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'Chrome/(?P<ver>\d+[.\d]+).+Mobile'); if e == null { .properties."$browser" = "Chrome Mobile"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br { m, e = parse_regex(ua, r'Chrome/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser" = "Chrome"; .properties."$browser_version" = string!(m.ver); br = true } }
+    
+            if !br { m, e = parse_regex(ua, r'(?:iPod|iPad|iPhone).+Version/(?P<ver>\d+[.\d]+).+Safari/'); if e == null { .properties."$browser" = "Mobile Safari"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br && match(ua, r'(?:iPod|iPad|iPhone)') && !match(ua, r'CriOS|FxiOS|EdgiOS') { .properties."$browser" = "Mobile Safari"; br = true }
+    
+            if !br { m, e = parse_regex(ua, r'Version/(?P<ver>\d+[.\d]+).+Safari/'); if e == null { .properties."$browser" = "Safari"; .properties."$browser_version" = string!(m.ver); br = true } }
+            if !br && match(ua, r'Safari/') && match(ua, r'Macintosh') { .properties."$browser" = "Safari"; br = true }
+    
+            # ── Fallback: Android built-in / Dalvik ──
+            if !br && match(ua, r'Dalvik/|Android') && !match(ua, r'Chrome|Firefox|Opera|UCBrowser') { .properties."$browser" = "Android Browser"; br = true }
+          }
+    
+          # ==========================================================
+          # Step 3B — Version Supplement
+          # When SDK set $browser but not $browser_version,
+          # extract version for that SPECIFIC browser from UA.
+          # ==========================================================
+          if exists(.properties."$browser") && !exists(.properties."$browser_version") {
+            sdk_br = string!(.properties."$browser")
+            vf = false
+    
+            # Chrome-based (most common SDK-reported browser)
+            if !vf && sdk_br == "Chrome"                { m, e = parse_regex(ua, r'Chrome/(?P<ver>\d+[.\d]+)');          if e == null { .properties."$browser_version" = string!(m.ver); vf = true } }
+            if !vf && sdk_br == "Chrome Webview"         { m, e = parse_regex(ua, r'Chrome/(?P<ver>\d+[.\d]+)');          if e == null { .properties."$browser_version" = string!(m.ver); vf = true } }
+            if !vf && sdk_br == "Chrome Mobile"          { m, e = parse_regex(ua, r'Chrome/(?P<ver>\d+[.\d]+)');          if e == null { .properties."$browser_version" = string!(m.ver); vf = true } }
+            if !vf && sdk_br == "Chrome Mobile iOS"      { m, e = parse_regex(ua, r'CriOS/(?P<ver>\d+[.\d]+)');          if e == null { .properties."$browser_version" = string!(m.ver); vf = true } }
+            if !vf && sdk_br == "Microsoft Edge"         { m, e = parse_regex(ua, r'Edg(?:e|A|iOS)?/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser_version" = string!(m.ver); vf = true } }
+            if !vf && sdk_br == "Firefox"                { m, e = parse_regex(ua, r'Firefox/(?P<ver>\d+[.\d]+)');         if e == null { .properties."$browser_version" = string!(m.ver); vf = true } }
+            if !vf && sdk_br == "Opera"                  { m, e = parse_regex(ua, r'OPR/(?P<ver>\d+[.\d]+)');            if e == null { .properties."$browser_version" = string!(m.ver); vf = true } }
+            if !vf && sdk_br == "Safari"                 { m, e = parse_regex(ua, r'Version/(?P<ver>\d+[.\d]+)');        if e == null { .properties."$browser_version" = string!(m.ver); vf = true } }
+            if !vf && sdk_br == "QQ Browser"             { m, e = parse_regex(ua, r'(?:MQQBrowser|QQBrowser)/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser_version" = string!(m.ver); vf = true } }
+            if !vf && sdk_br == "UC Browser"             { m, e = parse_regex(ua, r'UCBrowser/(?P<ver>\d+[.\d]+)');      if e == null { .properties."$browser_version" = string!(m.ver); vf = true } }
+            if !vf && sdk_br == "Samsung Browser"        { m, e = parse_regex(ua, r'SamsungBrowser/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser_version" = string!(m.ver); vf = true } }
+            if !vf && sdk_br == "Mi Browser"             { m, e = parse_regex(ua, r'(?:MIUIBrowser|MiuiBrowser)/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser_version" = string!(m.ver); vf = true } }
+            if !vf && sdk_br == "Huawei Browser"         { m, e = parse_regex(ua, r'HuaweiBrowser/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser_version" = string!(m.ver); vf = true } }
+            if !vf && sdk_br == "HONOR Browser"          { m, e = parse_regex(ua, r'bdhonorbrowser/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser_version" = string!(m.ver); vf = true } }
+            if !vf && sdk_br == "WeChat"                 { m, e = parse_regex(ua, r'MicroMessenger/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser_version" = string!(m.ver); vf = true } }
+            if !vf && sdk_br == "Headless Chrome"        { m, e = parse_regex(ua, r'HeadlessChrome/(?P<ver>\d+[.\d]+)'); if e == null { .properties."$browser_version" = string!(m.ver); vf = true } }
+    
+            # Mobile Safari fallback: use iOS version from UA
+            if !vf && sdk_br == "Mobile Safari" {
+              m, e = parse_regex(ua, r'Version/(?P<ver>\d+[.\d]+)')
+              if e == null { .properties."$browser_version" = string!(m.ver); vf = true }
+              if !vf {
+                m, e = parse_regex(ua, r'(?:CPU (?:iPhone )?OS|iPhone OS) (?P<ver>\d+[_\d.]+)')
+                if e == null { .properties."$browser_version" = replace(string!(m.ver), "_", "."); vf = true }
+              }
+            }
+          }
+    
+          # ==========================================================
+          # Step 4 — Device Type
+          # ==========================================================
+          if !exists(.properties."$device_type") {
+            if match(ua, r'(?:iPhone|iPod)') { .properties."$device_type" = "smartphone"; .properties."$manufacturer" = "Apple" }
+            if !exists(.properties."$device_type") && match(ua, r'iPad') { .properties."$device_type" = "tablet"; .properties."$manufacturer" = "Apple" }
+            if !exists(.properties."$device_type") && match(ua, r'Android.*Mobile') { .properties."$device_type" = "smartphone" }
+            if !exists(.properties."$device_type") && match(ua, r'Android') { .properties."$device_type" = "tablet" }
+            if !exists(.properties."$device_type") && match(ua, r'Windows Phone|HarmonyOS.*Mobile') { .properties."$device_type" = "smartphone" }
+            if !exists(.properties."$device_type") && match(ua, r'SmartTV|Smart-TV|GoogleTV|AppleTV|HbbTV|BRAVIA|Roku|Fire TV|AFT[ABMNS]') { .properties."$device_type" = "smart_tv" }
+            if !exists(.properties."$device_type") && match(ua, r'PlayStation|Xbox|Nintendo') { .properties."$device_type" = "console" }
+            if !exists(.properties."$device_type") && match(ua, r'(?:Windows NT|Macintosh|CrOS|X11)') { .properties."$device_type" = "desktop" }
+            if !exists(.properties."$device_type") && match(ua, r'Linux') && !match(ua, r'Android') { .properties."$device_type" = "desktop" }
+          }
+        }
+      }
+    }

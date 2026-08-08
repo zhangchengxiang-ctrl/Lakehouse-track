@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: lakehouse-track
+
+resources:
+  - ../../base
+  - configmap-fe-shared.yaml
+
+patches:
+  - path: patches/starrocks-fe.yaml
+  - path: patches/starrocks-cn.yaml
+  - path: patches/minio.yaml
+  - path: patches/postgres.yaml
+  - path: patches/collection.yaml
+  - path: patches/hpa.yaml
+  - path: patches/services-nodeport.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/overlay: lab
+    includeSelectors: false

@@ -4,6 +4,7 @@
 
 - **埋点链路**：SDK → Nginx → Vector → S3 (TSV.gz) → StarRocks Pipe
 - **CDC 链路**：PostgreSQL → Flink CDC → Paimon → StarRocks Paimon Catalog
+- **数仓建模**：本仓独立 SQLMesh（`projects/warehouse`，不合并 platform）
 - **元数据**：PostgreSQL（业务元数据 + Hive Metastore 后端）
 - **存储**：MinIO (S3 兼容) 承载 Paimon 数据与 StarRocks 存算分离数据
 
@@ -82,6 +83,17 @@ graph TD
 - `make verify`: 发送测试埋点并自动检查全链路状态。
 - `make reset`: 清空所有数据并重新初始化整个环境。
 - `make replay`: 重放 test_data 中的神策日志。
+- `make sqlmesh-install` / `sqlmesh-info` / `sqlmesh-ui`: 本仓 SQLMesh（见 `services/sqlmesh/README.md`）。
+
+### 2.4 SQLMesh（可选）
+
+```bash
+make sqlmesh-install && make sqlmesh-info   # CLI → 连 127.0.0.1:9030
+make sqlmesh-ui                            # http://127.0.0.1:8082
+# 或：docker compose --profile sqlmesh up -d --build sqlmesh
+```
+
+项目目录：`projects/warehouse/`（示例模型 `demo.hello`）。状态库默认 DuckDB（`data/sqlmesh_state.db`）。
 
 ---
 

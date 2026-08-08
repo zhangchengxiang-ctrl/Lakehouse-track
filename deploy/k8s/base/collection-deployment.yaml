@@ -107,6 +107,10 @@ spec:
         # ---- Nginx ----
         - name: nginx
           image: nginx:1.27-alpine
+          # open_log_file_cache 会检查 root；官方镜像默认 html 目录在部分挂载场景下缺失
+          command: ["/bin/sh", "-c"]
+          args:
+            - mkdir -p /etc/nginx/html && exec nginx -g 'daemon off;'
           ports:
             - containerPort: 80
               name: http
@@ -170,6 +174,9 @@ spec:
             - name: vector-config
               mountPath: /etc/vector/vector.yaml
               subPath: vector.yaml
+            - name: ua-parser-vrl
+              mountPath: /etc/vector/ua_parser.vrl
+              subPath: ua_parser.vrl
             - name: shared-logs
               mountPath: /var/log/nginx
               readOnly: true
@@ -186,7 +193,8 @@ spec:
         # ---- MetaAPI sidecar (FastAPI + uvicorn) ----
         - name: meta-api
           image: lakehouse-track/collection:latest
-          command: ["uvicorn", "meta_api:app", "--host", "127.0.0.1", "--port", "3000", "--workers", "2", "--log-level", "warning"]
+          # 0.0.0.0：K8s probe 打 Pod IP；sidecar 内 Vector 仍可用 127.0.0.1
+          command: ["uvicorn", "meta_api:app", "--host", "0.0.0.0", "--port", "3000", "--workers", "2", "--log-level", "warning"]
           workingDir: /app
           resources:
             requests:
@@ -284,6 +292,9 @@ spec:
         - name: vector-config
           configMap:
             name: vector-scale-config
+        - name: ua-parser-vrl
+          configMap:
+            name: ua-parser-vrl
         - name: shared-logs
           emptyDir:
             sizeLimit: 2Gi
